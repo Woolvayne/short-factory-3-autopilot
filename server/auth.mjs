@@ -1,31 +1,22 @@
 /**
- * ShortsFactory v3 — Passwort-Gate (Vercel Serverless Function, Node.js)
+ * ShortsFactory v4 — Passwort-Gate (eingebauter Server, kein Vercel nötig)
  *
  * Die Onepage-Seite fragt hier an, ob und wann sie rein darf. Alles läuft
  * serverseitig, damit eine IP wirklich gesperrt werden kann:
  *
  *   GET  /api/auth?action=status   → Ist ein Passwort gesetzt? Ist diese IP gesperrt?
- *                                    Wie viele Versuche sind noch frei? (kein Passwort-Leak)
  *   POST /api/auth  {action:"unlock", password}
  *                                  → prüft das Passwort. Erfolg = signiertes Sitzungs-Token.
- *                                    Fehlversuch = Zähler +1. Ab `APP_MAX_ATTEMPTS`
- *                                    (Standard 5) wird die IP gesperrt — mit
- *                                    eskalierenden Sperrzeiten (5 min → 15 min → 1 h → 6 h → 24 h).
  *   POST /api/auth  {action:"check", token}
- *                                  → ist ein Token noch gültig? (z. B. nach Tab-Wechsel)
- *   POST /api/auth  {action:"lock"} → Zähler dieser IP vergessen (Client löscht sein Token selbst).
+ *                                  → ist ein Token noch gültig?
+ *   POST /api/auth  {action:"lock"} → Zähler dieser IP vergessen.
  *
- * Environment-Variablen (Vercel → Settings → Environment Variables):
+ * Konfiguration über Umgebungsvariablen oder `.env` im Projektroot:
  *   APP_PASSWORD           Klartext-Passwort — empfohlen, bleibt serverseitig
  *   APP_PASSWORD_HASH      Alternative: SHA-256 des Passworts
  *   APP_MAX_ATTEMPTS       Fehlversuche bis zur Sperre (Standard 5)
  *   APP_LOCKOUT_MINUTES    Sperr-Stufen in Minuten (Standard 5,15,60,360,1440)
  *   APP_SESSION_TTL        Gültigkeit des Tokens in Sekunden (Standard 43200 = 12 h)
- *   KV_REST_API_URL / KV_REST_API_TOKEN      optional: Vercel KV für globales Rate-Limit
- *   UPSTASH_REDIS_REST_URL / _TOKEN          optional: Upstash direkt
- *
- * Ohne `VITE_`-Prefix landen diese Werte nie im Browser-Bundle.
- * Anleitung: docs/EINRICHTUNG.md · docs/ANLEITUNG.md
  */
 
 import {
@@ -44,12 +35,7 @@ import {
   sessionTtlSeconds,
   lockoutStepsMinutes,
   verifyToken,
-} from "./_lib/gate.js";
-
-export const config = {
-  runtime: "nodejs",
-  maxDuration: 15,
-};
+} from "./gate.mjs";
 
 const noStore = (res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -77,6 +63,14 @@ const statePayload = (state) => ({
   sessionTtlSeconds: sessionTtlSeconds(),
 });
 
+function safeParse(text) {
+  try {
+    return JSON.parse(text || "{}");
+  } catch {
+    return {};
+  }
+}
+
 export default async function handler(req, res) {
   noStore(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -93,8 +87,7 @@ export default async function handler(req, res) {
       configured: false,
       mode: "off",
       store: rateLimitStore(),
-      hint:
-        "Kein Passwort gesetzt — APP_PASSWORD in Vercel fehlt. Anleitung: docs/EINRICHTUNG.md",
+      hint: "Kein Passwort gesetzt — APP_PASSWORD in der .env fehlt. Anleitung: docs/EINRICHTUNG.md",
     });
   }
 
@@ -129,12 +122,12 @@ export default async function handler(req, res) {
   if (before.locked) {
     res.setHeader("Retry-After", String(before.retryAfterSeconds));
     return json(429, {
+      ...statePayload(before),
       ok: false,
       error: "GESPERRT",
       message: `Zu viele Fehlversuche. Diese IP ist noch ${humanizeMinutes(
         before.retryAfterSeconds / 60
       )} gesperrt.`,
-      ...statePayload(before),
     });
   }
 
@@ -148,20 +141,15 @@ export default async function handler(req, res) {
     if (state.locked) {
       res.setHeader("Retry-After", String(state.retryAfterSeconds));
       return json(429, {
+        ...statePayload({ ...state, attemptsLeft: state.attemptsLeft }),
         ok: false,
         error: "GESPERRT",
         message: `${state.maxAttempts} Fehlversuche in Folge — diese IP ist jetzt für ${humanizeMinutes(
           state.nextLockoutMinutes
         )} gesperrt. Jede weitere Sperre wird länger.`,
-        ...statePayload({ ...state, attemptsLeft: state.attemptsLeft }),
       });
     }
     return json(401, {
-      ok: false,
-      error: "FALSCH",
-      message: `Falsches Passwort. Noch ${state.attemptsLeft} Versuch${
-        state.attemptsLeft === 1 ? "" : "e"
-      } bis zur Sperre.`,
       ...statePayload({
         ...state,
         locked: false,
@@ -169,6 +157,11 @@ export default async function handler(req, res) {
         lockedUntil: null,
         nextLockoutMinutes: state.nextLockoutMinutes,
       }),
+      ok: false,
+      error: "FALSCH",
+      message: `Falsches Passwort. Noch ${state.attemptsLeft} Versuch${
+        state.attemptsLeft === 1 ? "" : "e"
+      } bis zur Sperre.`,
     });
   }
 
@@ -186,12 +179,4 @@ export default async function handler(req, res) {
     message:
       "Freigeschaltet. Das Passwort wird bei jedem Neuladen der Seite erneut verlangt — das Token liegt nur im Arbeitsspeicher des Tabs.",
   });
-}
-
-function safeParse(text) {
-  try {
-    return JSON.parse(text || "{}");
-  } catch {
-    return {};
-  }
 }

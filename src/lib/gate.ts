@@ -1,51 +1,38 @@
 /**
- * Onepage-Passwort-Gate — Client-Seite.
+ * Onepage-Passwort-Gate — zwei Wege, automatisch gewählt:
  *
- * Ab v3.1 läuft die Prüfung **serverseitig** über `/api/auth`:
+ *   1. **Eingebauter Server** (`npm start`, Pi/Heimserver): Die Prüfung läuft
+ *      serverseitig über `/api/auth` — Passwort aus `APP_PASSWORD` /
+ *      `APP_PASSWORD_HASH` (`.env`), IP-Rate-Limit mit eskalierenden Sperren.
+ *   2. **Rein statische Seite** (kein Server erreichbar): Lokaler Schutz auf
+ *      diesem Gerät — Passwort als SHA-256 im localStorage, gleiche Sperrlogik
+ *      im Browser (Einstellungen → APP). Ehrlicher Sichtschutz ohne Server.
  *
- *   • Das Passwort kommt aus einer Vercel-Environment-Variable
- *     (`APP_PASSWORD` — Klartext, serverseitig — oder `APP_PASSWORD_HASH`).
- *   • Nach 5 Fehlversuchen in Folge sperrt der Server die **IP** — mit
- *     eskalierenden Sperrzeiten (5 min → 15 min → 1 h → 6 h → 24 h).
- *     Ohne KV/Redis gilt die Sperre pro warmer Lambda-Instanz, mit Vercel KV
- *     global. Details: docs/EINRICHTUNG.md
- *   • Bei Erfolg gibt es ein signiertes Token. Das liegt **nur im
- *     Arbeitsspeicher dieses Tabs** — kein localStorage, kein sessionStorage.
- *     Ergebnis: Bei jedem Neuladen (F5) muss das Passwort erneut eingegeben
- *     werden, genau wie gewünscht.
- *
- * Fallback ohne Server-Function (z. B. reiner `npm run dev` ohne vercel dev,
- * oder ein Deploy ohne Passwort-Variable): Ist `VITE_APP_PASSWORD_HASH` bzw.
- * `VITE_APP_PASSWORD` beim Build gesetzt, prüft der Browser lokal weiterhin
- * gegen den Hash. Dann gilt ein eigenes, gleich aufgebautes Rate-Limit im
- * Browser (pro Gerät, nicht pro IP) und die Zernio-Route prüft denselben Wert
- * serverseitig über `x-sf-auth`.
+ * In beiden Fällen gilt: Das Sitzungs-Token liegt NUR im Arbeitsspeicher des
+ * Tabs → jedes Neuladen (F5) verlangt das Passwort erneut.
  */
 
-/** Vite ersetzt diese Werte beim Build — nur für den Offline-Fallback nötig. */
-const ENV_HASH = String(import.meta.env.VITE_APP_PASSWORD_HASH ?? "")
-  .trim()
-  .toLowerCase();
-const ENV_PLAIN = String(import.meta.env.VITE_APP_PASSWORD ?? "").trim();
+import { probeBackend } from "./relay";
 
-export type GateMode = "server" | "hash" | "plain" | "off";
+export type GateMode = "server" | "local" | "off";
 
-/** Standard-Sperrstufen (Minuten) — identisch zu api/_lib/gate.js. */
+/** Standard-Sperrstufen (Minuten). */
 export const DEFAULT_LOCKOUT_MINUTES = [5, 15, 60, 360, 1440];
+const LOCAL_MAX_ATTEMPTS = 5;
+
+const LOCAL_HASH_KEY = "shortsfactory.gate.v1";
+const LOCAL_RATE_KEY = "shortsfactory.gate.rate.v1";
 
 export interface GateStatus {
-  /** "server" = /api/auth aktiv · "hash"/"plain" = lokaler Fallback · "off" = kein Passwort */
+  /** "server" = /api/auth aktiv · "local" = Schutz nur auf diesem Gerät · "off" = offen */
   mode: GateMode;
-  /** Muss die Seite ein Passwort verlangen? */
   requirePassword: boolean;
-  /** Antwortet die Serverless-Route? (false → lokaler Fallback) */
   serverReachable: boolean;
   locked: boolean;
   retryAfterSeconds: number;
   lockedUntil: number | null;
   attemptsLeft: number;
   failures: number;
-  /** Wie oft diese IP in diesem Zeitraum schon gesperrt wurde (Eskalation). */
   level: number;
   maxAttempts: number;
   schedule: number[];
@@ -78,15 +65,6 @@ export const FALLBACK_STATUS: GateStatus = {
 
 let sessionToken: string | null = null;
 let sessionExpiresAt = 0;
-/** Wird beim Status-Check gesetzt: true, wenn `/api/auth` ein Passwort kennt. */
-let serverGateConfigured = false;
-
-export const setServerGateConfigured = (value: boolean): void => {
-  serverGateConfigured = value;
-};
-
-export const gateEnabled = (): boolean =>
-  Boolean(ENV_HASH) || Boolean(ENV_PLAIN) || serverGateConfigured;
 
 export function isUnlocked(): boolean {
   if (!sessionToken) return false;
@@ -103,7 +81,7 @@ export function lock(): void {
 }
 
 /**
- * Wird ausgelöst, wenn eine Route hinter dem Gate `401` meldet (Token
+ * Wird ausgelöst, wenn eine Route hinter dem Server-Gate `401` meldet (Token
  * abgelaufen) — die App zeigt dann wieder die Passwort-Seite.
  */
 export const GATE_EXPIRED_EVENT = "shortsfactory:gate-expired";
@@ -116,18 +94,14 @@ export function notifyGateExpired(): void {
   }
 }
 
-/** Header für alle Routen, die hinter dem Gate liegen (`/api/zernio`). */
+/** Header für Routen hinter dem Server-Gate (`/api/zernio`). */
 export function gateHeaders(): Record<string, string> {
   const token = isUnlocked() ? sessionToken : null;
-  if (token) return { "x-sf-auth": token };
-  /* Legacy-Fallback ohne Server-Function: Hash/Passwort als Token. */
-  if (ENV_HASH) return { "x-sf-auth": ENV_HASH };
-  if (ENV_PLAIN) return { "x-sf-auth": ENV_PLAIN };
-  return {};
+  return token ? { "x-sf-auth": token } : {};
 }
 
 /* ------------------------------------------------------------------ */
-/*  Krypto-Helfer (nur für den Offline-Fallback)                       */
+/*  Krypto-Helfer (lokaler Modus)                                       */
 /* ------------------------------------------------------------------ */
 
 /** SHA-256 hex — braucht einen secure context (HTTPS oder localhost). */
@@ -156,36 +130,91 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Lokaler Fallback — Zähler pro Gerät (kein Server vorhanden)        */
+/*  Lokaler Passwort-Speicher (Einstellungen → APP)                     */
 /* ------------------------------------------------------------------ */
 
-interface LocalState {
+export function hasGatePassword(): boolean {
+  try {
+    return Boolean(localStorage.getItem(LOCAL_HASH_KEY));
+  } catch {
+    return false;
+  }
+}
+
+/** Lokales Passwort setzen/ersetzen (SHA-256 im localStorage). */
+export async function setGatePassword(password: string): Promise<void> {
+  const hash = await sha256Hex(password);
+  try {
+    localStorage.setItem(LOCAL_HASH_KEY, hash);
+  } catch {
+    /* private mode */
+  }
+}
+
+/** Lokalen Passwort-Schutz entfernen (Gate danach offen). */
+export function clearGatePassword(): void {
+  try {
+    localStorage.removeItem(LOCAL_HASH_KEY);
+    localStorage.removeItem(LOCAL_RATE_KEY);
+  } catch {
+    /* private mode */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Lokaler Modus — Zähler pro Gerät                                    */
+/* ------------------------------------------------------------------ */
+
+interface LocalRateState {
   fails: number;
   level: number;
   lockedUntil: number;
 }
 
-let localState: LocalState = { fails: 0, level: 0, lockedUntil: 0 };
+function readLocalRate(): LocalRateState {
+  try {
+    const raw = localStorage.getItem(LOCAL_RATE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<LocalRateState>;
+      return {
+        fails: Number(parsed.fails ?? 0),
+        level: Number(parsed.level ?? 0),
+        lockedUntil: Number(parsed.lockedUntil ?? 0),
+      };
+    }
+  } catch {
+    /* kaputtes JSON → neu */
+  }
+  return { fails: 0, level: 0, lockedUntil: 0 };
+}
 
-const localStatus = (): GateStatus => {
-  const retryAfterSeconds = Math.max(0, Math.ceil((localState.lockedUntil - Date.now()) / 1000));
+function writeLocalRate(state: LocalRateState): void {
+  try {
+    localStorage.setItem(LOCAL_RATE_KEY, JSON.stringify(state));
+  } catch {
+    /* private mode */
+  }
+}
+
+function localStatus(): GateStatus {
+  const rate = readLocalRate();
+  const retryAfterSeconds = Math.max(0, Math.ceil((rate.lockedUntil - Date.now()) / 1000));
   return {
     ...FALLBACK_STATUS,
-    mode: ENV_HASH ? "hash" : "plain",
+    mode: "local",
     requirePassword: true,
-    serverReachable: false,
     locked: retryAfterSeconds > 0,
     retryAfterSeconds,
-    lockedUntil: localState.lockedUntil || null,
-    failures: localState.fails,
-    attemptsLeft: Math.max(0, FALLBACK_STATUS.maxAttempts - localState.fails),
-    level: localState.level,
+    lockedUntil: rate.lockedUntil || null,
+    failures: rate.fails,
+    attemptsLeft: Math.max(0, LOCAL_MAX_ATTEMPTS - rate.fails),
+    level: rate.level,
     store: "browser",
   };
-};
+}
 
 /* ------------------------------------------------------------------ */
-/*  Server-Kommunikation                                               */
+/*  Server-Kommunikation                                                */
 /* ------------------------------------------------------------------ */
 
 const AUTH_ENDPOINT = "/api/auth";
@@ -211,151 +240,144 @@ const asStatus = (data: Record<string, unknown> | null): GateStatus => ({
 });
 
 /**
- * Fragt den Server: Passwort nötig? IP gesperrt? Wie viele Versuche frei?
- * Ist die Route nicht erreichbar oder ohne Passwort konfiguriert, greift der
- * lokale Fallback (bzw. das Gate ist ganz aus).
+ * Fragt zuerst den eingebauten Server; ist er nicht da (oder ohne Passwort
+ * konfiguriert), greift der lokale Modus.
  */
 export async function fetchGateStatus(): Promise<GateStatus> {
-  try {
-    const res = await fetch(`${AUTH_ENDPOINT}?action=status`, {
-      cache: "no-store",
-      headers: { accept: "application/json" },
-    });
-    if (res.ok) {
-      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (data && data.configured) {
-        setServerGateConfigured(true);
-        return asStatus(data);
+  if (await probeBackend()) {
+    try {
+      const res = await fetch(`${AUTH_ENDPOINT}?action=status`, {
+        cache: "no-store",
+        headers: { accept: "application/json" },
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (data && data.configured) return asStatus(data);
+        /* Server da, aber kein Server-Passwort → ggf. lokaler Schutz */
+        return hasGatePassword()
+          ? { ...localStatus(), serverReachable: true }
+          : { ...FALLBACK_STATUS, serverReachable: true };
       }
-      /* Server erreichbar, aber kein Passwort gesetzt. */
-      setServerGateConfigured(false);
-      if (!ENV_HASH && !ENV_PLAIN) return { ...FALLBACK_STATUS };
-      return localStatus();
+    } catch {
+      /* fällt auf lokal zurück */
     }
-  } catch {
-    /* Route fehlt / offline → lokaler Fallback */
   }
-  if (!ENV_HASH && !ENV_PLAIN) return { ...FALLBACK_STATUS };
-  return localStatus();
+  return hasGatePassword() ? localStatus() : { ...FALLBACK_STATUS };
 }
 
 export type UnlockResult =
   | { ok: true; token: string; message?: string }
   | { ok: false; status: GateStatus; message: string; code: "FALSCH" | "GESPERRT" | "FEHLER" | "LEER" };
 
-/**
- * Schickt das Passwort an `/api/auth`. Bei Fehlversuch kommt der neue
- * Zählerstand (inkl. Sperre) zurück, bei Erfolg das Sitzungs-Token.
- */
+/** Schickt das Passwort an `/api/auth` — oder prüft lokal, wenn kein Server da ist. */
 export async function unlock(password: string): Promise<UnlockResult> {
-  /* ---- Server-Weg ---- */
-  try {
-    const res = await fetch(AUTH_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ action: "unlock", password }),
-    });
-    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-    /* Kein JSON = keine echte Route (z. B. SPA-Fallback) → lokaler Weg. */
-    if (!data || typeof data !== "object" || typeof data.ok === "undefined") {
-      throw new Error("__NO_ROUTE__");
-    }
+  const server = await probeBackend();
 
-    if (res.ok && data.ok && typeof data.token === "string") {
-      sessionToken = data.token;
-      sessionExpiresAt = Number(data.expiresAt ?? 0) || Date.now() + 12 * 3600 * 1000;
-      localState = { fails: 0, level: 0, lockedUntil: 0 };
-      return { ok: true, token: data.token, message: String(data.message ?? "") };
-    }
-
-    if (res.status === 404) throw new Error("__NO_ROUTE__");
-
-    const status = asStatus(data);
-    const raw = String(data?.error ?? "").toUpperCase();
-    const code: "FALSCH" | "GESPERRT" | "LEER" | "FEHLER" =
-      raw === "FALSCH" || raw === "GESPERRT" || raw === "LEER" ? raw : "FEHLER";
-    const message =
-      typeof data?.message === "string" && data.message
-        ? data.message
-        : code === "GESPERRT"
-          ? "Zu viele Fehlversuche — diese IP ist vorübergehend gesperrt."
-          : code === "LEER"
-            ? "Bitte ein Passwort eingeben."
-            : "Falsches Passwort.";
-    return { ok: false, status, message, code };
-  } catch (e) {
-    if (!(e instanceof Error) || e.message !== "__NO_ROUTE__") {
-      /* Netzwerkfehler → lokaler Fallback versuchen */
+  if (server) {
+    try {
+      const res = await fetch(AUTH_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ action: "unlock", password }),
+      });
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (data && typeof data.ok !== "undefined") {
+        if (res.ok && data.ok && typeof data.token === "string") {
+          sessionToken = data.token;
+          sessionExpiresAt = Number(data.expiresAt ?? 0) || Date.now() + 12 * 3600 * 1000;
+          return { ok: true, token: data.token, message: String(data.message ?? "") };
+        }
+        /* Server ohne konfiguriertes Passwort → lokal weiter */
+        if (data.configured === false) return localUnlock(password);
+        const status = asStatus(data);
+        const raw = String(data?.error ?? "").toUpperCase();
+        const code: "FALSCH" | "GESPERRT" | "LEER" | "FEHLER" =
+          raw === "FALSCH" || raw === "GESPERRT" || raw === "LEER" ? raw : "FEHLER";
+        const message =
+          typeof data?.message === "string" && data.message
+            ? data.message
+            : code === "GESPERRT"
+              ? "Zu viele Fehlversuche — diese IP ist vorübergehend gesperrt."
+              : code === "LEER"
+                ? "Bitte ein Passwort eingeben."
+                : "Falsches Passwort.";
+        return { ok: false, status, message, code };
+      }
+    } catch {
+      /* fällt auf lokal zurück */
     }
   }
 
-  /* ---- Lokaler Fallback (kein Server / dev-Server) ---- */
   return localUnlock(password);
 }
 
-/** Prüfung im Browser gegen die eingebackene Variable + lokales Rate-Limit. */
+/** Prüfung im lokalen Modus gegen den gespeicherten Hash + lokales Rate-Limit. */
 async function localUnlock(password: string): Promise<UnlockResult> {
   const state = localStatus();
-  if (state.locked) return { ok: false, status: state, message: "Gesperrt — bitte warten.", code: "GESPERRT" };
+  if (state.locked) {
+    return { ok: false, status: state, message: "Gesperrt — bitte warten.", code: "GESPERRT" };
+  }
   if (!password.trim()) {
     return { ok: false, status: state, message: "Bitte ein Passwort eingeben.", code: "LEER" };
   }
-  if (!ENV_HASH && !ENV_PLAIN) {
-    /* Kein Passwort konfiguriert → direkt rein. */
+  if (!hasGatePassword()) {
     sessionToken = "open";
     sessionExpiresAt = 0;
     return { ok: true, token: "open" };
   }
 
-  let match = false;
-  const candidates = [password, password.trim()];
-  if (ENV_HASH) {
-    for (const candidate of candidates) {
-      if (safeEqual(await sha256Hex(candidate), ENV_HASH)) {
-        match = true;
-        break;
-      }
+  const stored = (() => {
+    try {
+      return String(localStorage.getItem(LOCAL_HASH_KEY) ?? "");
+    } catch {
+      return "";
     }
-  } else {
-    for (const candidate of candidates) {
-      if (safeEqual(candidate, ENV_PLAIN)) {
-        match = true;
-        break;
-      }
+  })();
+
+  let match = false;
+  for (const candidate of [password, password.trim()]) {
+    if (stored && safeEqual(await sha256Hex(candidate), stored)) {
+      match = true;
+      break;
     }
   }
 
+  const rate = readLocalRate();
+
   if (match) {
-    sessionToken = ENV_HASH ? ENV_HASH : ENV_PLAIN;
+    sessionToken = "local-unlocked";
     sessionExpiresAt = Date.now() + FALLBACK_STATUS.sessionTtlSeconds * 1000;
-    localState = { fails: 0, level: 0, lockedUntil: 0 };
+    writeLocalRate({ fails: 0, level: rate.level, lockedUntil: 0 });
     return { ok: true, token: sessionToken };
   }
 
-  localState.fails += 1;
-  if (localState.fails >= FALLBACK_STATUS.maxAttempts) {
-    const steps = DEFAULT_LOCKOUT_MINUTES;
-    const index = Math.min(localState.level, steps.length - 1);
-    localState.lockedUntil = Date.now() + steps[index] * 60_000;
-    localState.level = Math.min(localState.level + 1, steps.length);
-    localState.fails = 0;
+  rate.fails += 1;
+  if (rate.fails >= LOCAL_MAX_ATTEMPTS) {
+    const index = Math.min(rate.level, DEFAULT_LOCKOUT_MINUTES.length - 1);
+    rate.lockedUntil = Date.now() + DEFAULT_LOCKOUT_MINUTES[index] * 60_000;
+    rate.level = Math.min(rate.level + 1, DEFAULT_LOCKOUT_MINUTES.length);
+    rate.fails = 0;
+    writeLocalRate(rate);
     return {
       ok: false,
       status: localStatus(),
-      message: `5 Fehlversuche in Folge — für ${humanizeMinutes(steps[index])} gesperrt (ohne Server nur in diesem Browser).`,
+      message: `${LOCAL_MAX_ATTEMPTS} Fehlversuche in Folge — für ${humanizeMinutes(
+        DEFAULT_LOCKOUT_MINUTES[index]
+      )} gesperrt (auf diesem Gerät).`,
       code: "GESPERRT",
     };
   }
+  writeLocalRate(rate);
   return {
     ok: false,
     status: localStatus(),
-    message: `Falsches Passwort. Noch ${FALLBACK_STATUS.maxAttempts - localState.fails} Versuch(e) bis zur Sperre.`,
+    message: `Falsches Passwort. Noch ${LOCAL_MAX_ATTEMPTS - rate.fails} Versuch(e) bis zur Sperre.`,
     code: "FALSCH",
   };
 }
 
 /* ------------------------------------------------------------------ */
-/*  Anzeige-Helfer                                                     */
+/*  Anzeige-Helfer                                                      */
 /* ------------------------------------------------------------------ */
 
 export function humanizeMinutes(minutes: number): string {
@@ -381,17 +403,15 @@ export function formatCountdown(seconds: number): string {
 }
 
 export const gateInfo = (status: GateStatus | null) => {
-  const mode = status?.mode ?? (ENV_HASH ? "hash" : ENV_PLAIN ? "plain" : "off");
+  const mode = status?.mode ?? "off";
   return {
     mode,
     enabled: mode !== "off",
     hint:
       mode === "server"
-        ? "Prüfung läuft serverseitig über /api/auth (APP_PASSWORD in Vercel). Jede falsche Eingabe zählt pro IP."
-        : mode === "hash"
-          ? "Offline-Modus: Prüfung gegen VITE_APP_PASSWORD_HASH im Browser (kein Server erreichbar)."
-          : mode === "plain"
-            ? "Offline-Modus: VITE_APP_PASSWORD (Klartext) — besser APP_PASSWORD serverseitig setzen."
-            : "Kein Passwort gesetzt → die App ist offen. Anleitung: docs/EINRICHTUNG.md",
+        ? "Serverseitiges Gate aktiv (APP_PASSWORD in der .env deines Servers). Jede falsche Eingabe zählt pro IP, das Token liegt nur im Tab-Speicher."
+        : mode === "local"
+          ? "Lokaler Schutz: Passwort als Hash auf DIESEM Gerät (kein Server). Ändern/Entfernen: Einstellungen → APP."
+          : "Kein Passwort gesetzt → die App ist offen. Schutz optional: APP_PASSWORD in der .env (Server) oder lokal unter Einstellungen → APP.",
   };
 };
