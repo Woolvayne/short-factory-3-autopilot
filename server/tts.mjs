@@ -1,11 +1,10 @@
 /**
- * ShortsFactory — TTS relay (Vercel Serverless Function, Node.js runtime)
+ * ShortsFactory v4 — TTS relay (eingebauter Server, kein Vercel nötig)
  *
  * Why this exists: browsers cannot open a WebSocket to Microsoft's Edge Read
  * Aloud endpoint (browser handshakes always carry an Origin header, which the
- * endpoint rejects), and Supabase's Edge Function runtime unreliably drops
- * outbound third-party WebSockets ("EarlyDrop" after ~10ms CPU). The Node.js
- * runtime on Vercel has no such restriction — raw `ws` connections work.
+ * endpoint rejects). Daher sitzt die Synthese in diesem eingebauten Node-
+ * Server — rohe `ws` Verbindungen sind hier ohne Einschränkung möglich.
  *
  * Implements the publicly documented open-source edge-tts protocol
  * (github.com/rany2/edge-tts, v7.2.8), including the current hardening:
@@ -38,14 +37,6 @@
  *
  * Same-origin with the app → no CORS, no apikey, no auth.
  */
-
-// Explicitly pin the Node.js runtime (NOT edge) — raw outbound WebSocket via "ws".
-export const config = {
-  runtime: "nodejs",
-  // Chunked synthesis + retries need headroom; the relay's own budget (below)
-  // ends well before this so we always return JSON instead of a platform 504.
-  maxDuration: 60,
-};
 
 import { createHash } from "node:crypto";
 import WebSocket from "ws";

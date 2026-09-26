@@ -1,32 +1,32 @@
 /**
- * Zernio Versandweg — Client-Seite.
+ * Zernio Versandweg — zwei Wege, automatisch gewählt:
  *
- * Der API-Key bleibt im Serverless-Function (api/zernio.js, Vercel Env
- * `ZERNIO_API_KEY`). Hier passieren drei Dinge:
+ *   1. **Eingebauter Server** (`npm start` auf dem Pi/Heimserver): Der API-Key
+ *      liegt als `ZERNIO_API_KEY` in der `.env` des Servers und verlässt ihn
+ *      nie. Der Browser redet same-origin mit `/api/zernio` — Passwort-Gate
+ *      inklusive, Upload-Relay als Notnagel für blockierte Direktuploads.
+ *   2. **Rein statische Seite** (kein Server): Der Key wird einmal im Panel
+ *      `06 · Versand` eingetippt und liegt im localStorage DIESES Geräts;
+ *      alle Aufrufe gehen danach direkt an `https://zernio.com/api/v1`.
  *
- *   1. Video bei Zernio presignen + hochladen (POST /v1/media/presign → PUT)
- *   2. Post anlegen (POST /v1/posts) — sofort, geplant oder als Entwurf
- *   3. Reihenfolge-Takt: zwischen JEDEM Video warten `SHIP_GAP_MS` = 3 Sekunden
- *
- * Kein Kalender, keine Slot-Datenbank: Die Zeiten (06:00/20:00 täglich oder
- * frei gewählt) werden hier ausgerechnet und als `scheduledFor` +
- * `timezone: "Europe/Berlin"` an Zernio übergeben.
+ * Der Rest ist identisch: presign → PUT-Upload → `POST /v1/posts` (sofort,
+ * geplant oder Entwurf), dazwischen exakt `SHIP_GAP_MS` = 3 Sekunden Takt.
+ * Die Zeitrechnerei (Europe/Berlin, Slot-Pläne) ist unverändert.
  *
  * API-Doku: https://docs.zernio.com · https://zernio.com/llms.txt
  */
 
 import { gateHeaders, notifyGateExpired } from "./gate";
+import { probeBackend } from "./relay";
 import { sleep } from "./media";
 import type { LocalRenderItem } from "./types";
 
-const ENDPOINT = "/api/zernio";
-const UPLOAD_ENDPOINT = "/api/zernio/upload";
+const RELAY_ENDPOINT = "/api/zernio";
+const RELAY_UPLOAD_ENDPOINT = "/api/zernio/upload";
+const DIRECT_BASE_URL = "https://zernio.com/api/v1";
 
 /** Pflicht-Pause zwischen zwei Videos — exakt 3 Sekunden. */
 export const SHIP_GAP_MS = 3000;
-
-/** Vercel begrenzt Request-Bodies auf 4,5 MB → darüber nur Direktupload. */
-const RELAY_MAX_BYTES = 4.2 * 1024 * 1024;
 
 export const SHIP_TIMEZONE = "Europe/Berlin";
 
@@ -43,13 +43,19 @@ export interface ZernioStatus {
   ok: boolean;
   configured: boolean;
   accounts: ZernioAccount[];
+  /** "relay" = Key auf dem Server (.env) · "direct" = Key in der App (localStorage) */
+  via?: "relay" | "direct";
   gate?: boolean;
   error?: string;
+  /** true, wenn der Browser Zernio gar nicht erreicht hat (Netzwerk/CORS) */
+  unreachable?: boolean;
 }
 
 export type ShipMode = "now" | "slots" | "flex" | "custom";
 
 export interface ShipConfig {
+  /** Zernio API-Key (`sk_…`) für den Server-losen Modus — nur localStorage. Bei vorhandenem Server leer lassen: dann gilt die Server-.env. */
+  apiKey: string;
   mode: ShipMode;
   /**
    * Uhrzeiten (Europe/Berlin, "HH:mm") für den Slot-Modus — Standard
@@ -85,6 +91,7 @@ export const DEFAULT_CAPTION_TEMPLATE = `{title}
 export const DEFAULT_SLOT_TIMES = ["06:00", "20:00"];
 
 export const DEFAULT_SHIP_CONFIG: ShipConfig = {
+  apiKey: "",
   mode: "now",
   slotTimes: [...DEFAULT_SLOT_TIMES],
   customTimes: [],
@@ -126,6 +133,7 @@ export function loadShipConfig(): ShipConfig {
     return {
       ...DEFAULT_SHIP_CONFIG,
       ...parsed,
+      apiKey: String(parsed.apiKey ?? "").trim(),
       slotTimes:
         Array.isArray(parsed.slotTimes) && parsed.slotTimes.length
           ? parsed.slotTimes
@@ -146,7 +154,7 @@ export function saveShipConfig(cfg: ShipConfig): void {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Zeit-Fenster (Europe/Berlin) — ohne Kalender, nur Rechnerei         */
+/*  Zeit-Fenster (Europe/Berlin) — ohne Kalender, nur Rechnerei          */
 /* ------------------------------------------------------------------ */
 
 interface BerlinParts {
@@ -368,18 +376,40 @@ export function validSlotTime(value: string): boolean {
 }
 
 /* ------------------------------------------------------------------ */
-/*  API-Aufrufe (same-origin → kein CORS, Key bleibt serverseitig)      */
+/*  Transport: Server-Relay (bevorzugt) oder direkter Browser-Call       */
 /* ------------------------------------------------------------------ */
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...gateHeaders(),
-      ...(init?.headers ?? {}),
-    },
-  });
+/** CORS/Netzwerk-Fehler erkennbar machen, damit die UI Klartext helfen kann. */
+const UNREACHABLE_HINT =
+  "Zernio ist aus dem Browser nicht erreichbar (Netzwerk/CORS). Prüfe die Internet-Verbindung und deaktiviere testweise Tracking-Blocker für diese Seite.";
+
+const NETWORK_ERROR = "__NETWORK__";
+
+function markUnreachable(e: unknown): Error {
+  const err = new Error(UNREACHABLE_HINT);
+  err.name = "UNREACHABLE";
+  if (e instanceof Error && e.name === "AbortError") return new Error("Zernio-Anfrage abgebrochen (Timeout).");
+  return err;
+}
+
+export const isUnreachableError = (e: unknown): boolean =>
+  e instanceof Error && e.name === "UNREACHABLE";
+
+/** Aufruf über das Server-Relay (Key bleibt auf dem Server). */
+async function relayCall<T>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...init,
+      headers: {
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...gateHeaders(),
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch {
+    throw new Error(NETWORK_ERROR);
+  }
   const data = await res.json().catch(() => null);
   if (!res.ok || data?.ok === false) {
     /* 401 = Sitzungs-Token abgelaufen/fehlt → App zurück auf die Passwort-Seite. */
@@ -391,25 +421,148 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export async function fetchZernioStatus(): Promise<ZernioStatus> {
+const extractErrorMessage = (data: Record<string, unknown> | null, status: number): string =>
+  (typeof (data?.error as { message?: string } | undefined)?.message === "string" &&
+    (data?.error as { message?: string }).message) ||
+  (typeof data?.error === "string" && (data.error as string)) ||
+  (typeof data?.message === "string" && (data.message as string)) ||
+  `Zernio HTTP ${status}`;
+
+/** Direkter Aufruf der Zernio-API aus dem Browser (Key aus der App). */
+async function directCall<T>(
+  path: string,
+  apiKey: string,
+  init?: { method?: string; body?: unknown }
+): Promise<T> {
+  let res: Response;
   try {
-    const data = await call<{
-      configured: boolean;
-      accounts: ZernioAccount[];
-      gate?: boolean;
-    }>(`${ENDPOINT}?action=status`);
+    res = await fetch(`${DIRECT_BASE_URL}${path}`, {
+      method: init?.method ?? "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: init?.body ? JSON.stringify(init.body) : undefined,
+    });
+  } catch (e) {
+    throw markUnreachable(e);
+  }
+  const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!res.ok) throw new Error(extractErrorMessage(data, res.status));
+  return data as T;
+}
+
+const POSTING_PLATFORMS = new Set([
+  "twitter",
+  "instagram",
+  "facebook",
+  "youtube",
+  "linkedin",
+  "threads",
+  "tiktok",
+  "pinterest",
+  "reddit",
+  "bluesky",
+  "googlebusiness",
+  "telegram",
+  "snapchat",
+  "whatsapp",
+  "discord",
+  "slack",
+]);
+
+/* TikTok verlangt laut API-Doku zwingend diese Settings. */
+const TIKTOK_SETTINGS = {
+  privacy_level: "PUBLIC_TO_EVERYONE",
+  allow_comment: true,
+  allow_duet: true,
+  allow_stitch: true,
+  commercial_content_type: "none",
+  content_preview_confirmed: true,
+  express_consent_given: true,
+  media_type: "video",
+  auto_add_music: false,
+  video_made_with_ai: false,
+};
+
+const normalizeAccounts = (payload: unknown): ZernioAccount[] => {
+  const p = payload as Record<string, unknown> | null;
+  const list: unknown[] = Array.isArray(p?.accounts)
+    ? (p!.accounts as unknown[])
+    : Array.isArray(p?.data)
+      ? (p!.data as unknown[])
+      : Array.isArray(p)
+        ? (p as unknown[])
+        : [];
+  return list
+    .map((a) => {
+      const acc = (a ?? {}) as Record<string, unknown>;
+      return {
+        id: String(acc._id ?? acc.id ?? ""),
+        platform: String(acc.platform ?? "").toLowerCase(),
+        username: String(acc.username ?? ""),
+        displayName: String(acc.displayName ?? ""),
+        profileId: String(acc.profileId ?? ""),
+        isActive: acc.isActive !== false,
+      };
+    })
+    .filter((a) => a.id && a.platform);
+};
+
+const postableAccounts = (accounts: ZernioAccount[]) =>
+  accounts.filter((a) => a.isActive && POSTING_PLATFORMS.has(a.platform));
+
+/**
+ * Status-Check: Key gültig? Welche Accounts sind verbunden?
+ * Wählt automatisch Relay (Server-.env) oder Direktmodus (App-Key).
+ */
+export async function fetchZernioStatus(cfg: Pick<ShipConfig, "apiKey">): Promise<ZernioStatus> {
+  /* Weg 1: eingebauter Server → Status inkl. ob ZERNIO_API_KEY in der .env liegt */
+  if (await probeBackend()) {
+    try {
+      const data = await relayCall<{
+        configured: boolean;
+        accounts: ZernioAccount[];
+        gate?: boolean;
+      }>(`${RELAY_ENDPOINT}?action=status`);
+      return {
+        ok: true,
+        configured: Boolean(data?.configured),
+        accounts: Array.isArray(data?.accounts) ? data.accounts : [],
+        gate: Boolean(data?.gate),
+        via: "relay",
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        configured: false,
+        accounts: [],
+        via: "relay",
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+
+  /* Weg 2: kein Server → Key aus der App (localStorage) */
+  const key = cfg.apiKey.trim();
+  if (!key) return { ok: true, configured: false, accounts: [], via: "direct" };
+  try {
+    const payload = await directCall<unknown>("/accounts", key);
     return {
       ok: true,
-      configured: Boolean(data?.configured),
-      accounts: Array.isArray(data?.accounts) ? data.accounts : [],
-      gate: Boolean(data?.gate),
+      configured: true,
+      accounts: postableAccounts(normalizeAccounts(payload)),
+      via: "direct",
     };
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     return {
       ok: false,
       configured: false,
       accounts: [],
-      error: e instanceof Error ? e.message : String(e),
+      via: "direct",
+      error: message,
+      unreachable: isUnreachableError(e),
     };
   }
 }
@@ -418,14 +571,44 @@ interface PresignResponse {
   uploadUrl: string;
   publicUrl: string;
   key?: string;
-  sig: string;
+  sig?: string;
+  expiresIn?: number;
 }
 
-export function presignMedia(filename: string, contentType: string, size: number) {
-  return call<PresignResponse>(ENDPOINT, {
+async function presignMedia(
+  cfg: Pick<ShipConfig, "apiKey">,
+  filename: string,
+  contentType: string,
+  size: number
+): Promise<PresignResponse> {
+  if (await probeBackend()) {
+    return relayCall<PresignResponse>(RELAY_ENDPOINT, {
+      method: "POST",
+      body: JSON.stringify({ action: "presign", filename, contentType, size }),
+    });
+  }
+  const key = cfg.apiKey.trim();
+  if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
+  const data = await directCall<Record<string, unknown>>("/media/presign", key, {
     method: "POST",
-    body: JSON.stringify({ action: "presign", filename, contentType, size }),
+    body: { filename, contentType, size },
   });
+  const inner = (data?.data ?? {}) as Record<string, unknown>;
+  const uploadUrl = String(
+    data?.uploadUrl ?? data?.upload_url ?? inner.uploadUrl ?? inner.upload_url ?? ""
+  );
+  const publicUrl = String(
+    data?.publicUrl ?? data?.public_url ?? inner.publicUrl ?? inner.public_url ?? ""
+  );
+  if (!uploadUrl || !publicUrl) {
+    throw new Error("Zernio hat keine Upload-URL zurückgegeben.");
+  }
+  return {
+    uploadUrl,
+    publicUrl,
+    key: String(data?.key ?? inner.key ?? ""),
+    expiresIn: Number(data?.expiresIn ?? inner.expiresIn ?? 3600),
+  };
 }
 
 export interface PublishInput {
@@ -443,36 +626,139 @@ export interface PublishInput {
   platforms?: { platform: string; accountId?: string }[];
 }
 
-export function publishPost(input: PublishInput) {
-  return call<{ postId: string | null; status: string; scheduledFor: string | null }>(ENDPOINT, {
-    method: "POST",
-    body: JSON.stringify({
-      action: "publish",
-      mediaUrl: input.mediaUrl,
-      filename: input.filename,
-      mimeType: input.mimeType,
-      size: input.size,
-      content: input.content,
-      title: input.title,
-      hashtags: input.hashtags,
-      tags: input.tags ?? [],
-      platforms: input.platforms ?? [],
-      isDraft: input.asDraft,
-      scheduledFor: input.slot.wall ?? undefined,
-      timezone: input.slot.wall ? (input.timezone ?? SHIP_TIMEZONE) : undefined,
-    }),
-  });
+export interface PublishResult {
+  postId: string | null;
+  status: string;
+  scheduledFor: string | null;
 }
 
-export function fetchPostStatus(postId: string) {
-  return call<{ postId: string; status: string }>(ENDPOINT, {
+async function publishPost(
+  cfg: Pick<ShipConfig, "apiKey">,
+  input: PublishInput
+): Promise<PublishResult> {
+  /* Weg 1: Relay übernimmt Payload+Account-Auto-Auswahl wie bisher */
+  if (await probeBackend()) {
+    return relayCall<PublishResult>(RELAY_ENDPOINT, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "publish",
+        mediaUrl: input.mediaUrl,
+        filename: input.filename,
+        mimeType: input.mimeType,
+        size: input.size,
+        content: input.content,
+        title: input.title,
+        hashtags: input.hashtags,
+        tags: input.tags ?? [],
+        platforms: input.platforms ?? [],
+        isDraft: input.asDraft,
+        scheduledFor: input.slot.wall ?? undefined,
+        timezone: input.slot.wall ? (input.timezone ?? SHIP_TIMEZONE) : undefined,
+      }),
+    });
+  }
+
+  /* Weg 2: direkt — Payload hier im Browser bauen */
+  const key = cfg.apiKey.trim();
+  if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
+
+  let platforms = Array.isArray(input.platforms)
+    ? input.platforms
+        .filter((p) => p && p.platform)
+        .map((p) => ({
+          platform: String(p.platform).toLowerCase(),
+          ...(p.accountId ? { accountId: String(p.accountId) } : {}),
+        }))
+    : [];
+
+  if (platforms.length === 0) {
+    platforms = postableAccounts(
+      normalizeAccounts(await directCall<unknown>("/accounts", key))
+    ).map((a) => ({ platform: a.platform, accountId: a.id }));
+  }
+  if (platforms.length === 0) {
+    throw new Error(
+      "Kein verbundener Social-Account in Zernio gefunden — Accounts unter zernio.com verbinden und erneut versuchen."
+    );
+  }
+
+  const hashtags = Array.isArray(input.hashtags)
+    ? input.hashtags.map((h) => String(h).replace(/^#/, "").trim()).filter(Boolean)
+    : [];
+  const tags = Array.isArray(input.tags) ? input.tags.map((t) => String(t).trim()).filter(Boolean) : [];
+  const title = String(input.title || "").slice(0, 100);
+  const content = String(input.content || title || "").slice(0, 4000);
+
+  const payload: Record<string, unknown> = {
+    content,
+    platforms,
+    mediaItems: [
+      {
+        type: "video",
+        url: input.mediaUrl,
+        ...(input.filename ? { filename: String(input.filename) } : {}),
+        ...(input.mimeType ? { mimeType: String(input.mimeType) } : {}),
+        ...(Number(input.size) ? { size: Number(input.size) } : {}),
+      },
+    ],
+    ...(title ? { title } : {}),
+    ...(hashtags.length ? { hashtags } : {}),
+    ...(tags.length ? { tags } : {}),
+    visibility: "public",
+  };
+
+  if (input.asDraft) {
+    payload.isDraft = true;
+  } else if (input.slot.wall) {
+    payload.scheduledFor = input.slot.wall;
+    payload.timezone = input.timezone ?? SHIP_TIMEZONE;
+  } else {
+    payload.publishNow = true;
+  }
+
+  if (platforms.some((p) => p.platform === "tiktok")) {
+    payload.tiktokSettings = { ...TIKTOK_SETTINGS };
+  }
+
+  const data = await directCall<Record<string, unknown>>("/posts", key, {
     method: "POST",
-    body: JSON.stringify({ action: "post-status", postId }),
+    body: payload,
   });
+  const inner = (data?.data ?? {}) as Record<string, unknown>;
+  const post = (data?.post ?? inner.post ?? data?.data ?? data) as Record<string, unknown>;
+  return {
+    postId: (post?._id as string) ?? (post?.id as string) ?? null,
+    status:
+      String(post?.status ?? "") ||
+      (payload.publishNow ? "publishing" : payload.isDraft ? "draft" : "scheduled"),
+    scheduledFor: (post?.scheduledFor as string) ?? input.slot.wall ?? null,
+  };
+}
+
+export async function fetchPostStatus(cfg: Pick<ShipConfig, "apiKey">, postId: string) {
+  if (await probeBackend()) {
+    return relayCall<{ postId: string; status: string }>(RELAY_ENDPOINT, {
+      method: "POST",
+      body: JSON.stringify({ action: "post-status", postId }),
+    });
+  }
+  const key = cfg.apiKey.trim();
+  if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
+  const data = await directCall<Record<string, unknown>>(
+    `/posts/${encodeURIComponent(postId)}`,
+    key
+  );
+  const inner = (data?.data ?? {}) as Record<string, unknown>;
+  const post = (data?.post ?? inner.post ?? data?.data ?? {}) as Record<string, unknown>;
+  return {
+    postId,
+    status: String(post?.status ?? "unknown"),
+    platforms: (post?.platforms as unknown[]) ?? [],
+  };
 }
 
 /* ------------------------------------------------------------------ */
-/*  Upload: Browser → Presigned URL (Fallback: Serverless-Relay)        */
+/*  Upload: Browser → presignierte Storage-URL (PUT)                     */
 /* ------------------------------------------------------------------ */
 
 function xhrUpload(
@@ -507,7 +793,7 @@ function xhrUpload(
           )
         );
     };
-    xhr.onerror = () => reject(new Error("__NETWORK__"));
+    xhr.onerror = () => reject(new Error(NETWORK_ERROR));
     xhr.ontimeout = () => reject(new Error("Upload-Timeout nach 10 Minuten"));
     xhr.send(blob);
   });
@@ -515,49 +801,51 @@ function xhrUpload(
 
 /**
  * Lädt ein Video zu Zernio und liefert die öffentliche URL für den Post.
- * Primärweg: direkter PUT auf die Presigned-URL (bis 5 GB, kein Body-Limit).
- * Fallback: derselbe Upload über die eigene Serverless-Route, falls der
- * Storage-Host den Browser-Upload per CORS blockt (dann max. ~4 MB).
+ * Primär direkter PUT auf die presignierte Storage-URL (bis 5 GB). Läuft ein
+ * eigener Server greift bei CORS-Ärger automatisch sein Upload-Relay.
  */
 export async function uploadVideoBlob(
+  cfg: Pick<ShipConfig, "apiKey">,
   blob: Blob,
   filename: string,
   contentType: string,
   onProgress?: (ratio: number) => void
 ): Promise<string> {
-  const presign = await presignMedia(filename, contentType, blob.size);
+  const relay = await probeBackend();
+  const presign = await presignMedia(cfg, filename, contentType, blob.size);
 
   try {
     await xhrUpload(presign.uploadUrl, "PUT", blob, { "Content-Type": contentType }, onProgress);
     return presign.publicUrl;
   } catch (e) {
-    const network = e instanceof Error && e.message === "__NETWORK__";
+    const network = e instanceof Error && e.message === NETWORK_ERROR;
     if (!network) throw e instanceof Error ? e : new Error(String(e));
-    if (blob.size > RELAY_MAX_BYTES) {
-      throw new Error(
-        `Der Video-Speicher hat den direkten Browser-Upload blockiert (CORS) und ${(
-          blob.size / 1024 / 1024
-        ).toFixed(1)} MB passen nicht durch den Relay (Limit 4,5 MB). Niedrigere Auflösung/Bitrate wählen (Settings → VIDEO) oder das Video per ZIP selbst hochladen.`
+
+    if (relay && presign.sig) {
+      /* Notnagel: derselbe Upload durch den eigenen Server (kein Vercel-Limit) */
+      await xhrUpload(
+        RELAY_UPLOAD_ENDPOINT,
+        "POST",
+        blob,
+        {
+          ...gateHeaders(),
+          "x-sf-target": presign.uploadUrl,
+          "x-sf-sig": presign.sig,
+          "x-sf-content-type": contentType,
+        },
+        onProgress
       );
+      return presign.publicUrl;
     }
-    await xhrUpload(
-      UPLOAD_ENDPOINT,
-      "POST",
-      blob,
-      {
-        ...gateHeaders(),
-        "x-sf-target": presign.uploadUrl,
-        "x-sf-sig": presign.sig,
-        "x-sf-content-type": contentType,
-      },
-      onProgress
+
+    throw new Error(
+      "Der Storage-Upload ist aus dem Browser gescheitert (Netzwerk/CORS). Bitte Verbindung prüfen — oder mit dem eingebauten Server starten (`npm start`), dann greift das Upload-Relay."
     );
-    return presign.publicUrl;
   }
 }
 
 /* ------------------------------------------------------------------ */
-/*  Beschriftung + Versand eines einzelnen Videos                       */
+/*  Beschriftung + Versand eines einzelnen Videos                        */
 /* ------------------------------------------------------------------ */
 
 export const shipFileName = (item: LocalRenderItem) =>
@@ -628,16 +916,21 @@ export async function shipVideo(
   hooks: ShipHooks
 ): Promise<ShipResult> {
   if (!item.blob) throw new Error("Dieses Unit ist noch nicht gerendert.");
+  if (!(await probeBackend()) && !cfg.apiKey.trim()) {
+    throw new Error(
+      "Kein Zernio-API-Key — entweder ZERNIO_API_KEY in die .env des Servers oder unten im Panel 06 eintragen (sk_…)."
+    );
+  }
 
   const filename = shipFileName(item);
   const contentType = item.mime?.split(";")[0] || "video/mp4";
 
   hooks.onStage?.("uploading");
-  const mediaUrl = await uploadVideoBlob(item.blob, filename, contentType, hooks.onProgress);
+  const mediaUrl = await uploadVideoBlob(cfg, item.blob, filename, contentType, hooks.onProgress);
 
   hooks.onStage?.("publishing");
   const caption = buildCaption(item, cfg);
-  const result = await publishPost({
+  const result = await publishPost(cfg, {
     mediaUrl,
     filename,
     mimeType: contentType,

@@ -1,10 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   BadgeCheck,
   Clock,
   CloudUpload,
+  Eye,
+  EyeOff,
   Hash,
   Inbox,
+  KeyRound,
   Loader2,
   RefreshCw,
   Rocket,
@@ -116,6 +119,7 @@ export default function ShipPanel({
   log: ShipLogEntry[];
   busy?: boolean;
 }) {
+  const [showKey, setShowKey] = useState(false);
   const done = useMemo(() => items.filter((i) => i.status === "done" && i.blob), [items]);
   const notSent = useMemo(
     () => done.filter((i) => shipStates[i.index]?.status !== "sent"),
@@ -180,7 +184,10 @@ export default function ShipPanel({
             )}
           />
           <span className="mono-label text-[9.5px] text-coal-200">
-            ZERNIO_API_KEY {status?.configured ? "VERBUNDEN" : "FEHLT"}
+            ZERNIO{" "}
+            {status?.configured
+              ? `VERBUNDEN${status.via === "direct" ? " · APP-KEY (DIESER RECHNER)" : " · SERVER (.env)"}`
+              : "NOCH NICHT VERBUNDEN"}
           </span>
         </span>
 
@@ -202,7 +209,7 @@ export default function ShipPanel({
           <span className="font-mono text-[9.5px] leading-relaxed text-amber-warn">
             {status?.error
               ? status.error.slice(0, 180)
-              : "Vercel → Settings → Environment Variables → ZERNIO_API_KEY setzen + neu deployen."}
+              : "Key holen: zernio.com → API → ZERNIO_API_KEY in die .env des Servers ODER direkt hier unten eintragen."}
           </span>
         )}
         {status?.configured && accounts.length === 0 && (
@@ -211,6 +218,38 @@ export default function ShipPanel({
           </span>
         )}
       </div>
+
+      {/* ----------------------------------------- API-Key (Fallback) */}
+      <Field
+        label="API-KEY (NUR WENN KEIN SERVER)"
+        hint={status?.via === "relay" ? "SERVER-.env AKTIV — DIESER KEY WIRD IGNORIERT" : status?.via === "direct" ? "APP-KEY AKTIV · NUR LOKAL GESPEICHERT" : "sk_…"}
+      >
+        <div className="relative">
+          <KeyRound className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-coal-400" />
+          <input
+            type={showKey ? "text" : "password"}
+            value={cfg.apiKey}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="sk_… (leer lassen, wenn der Server .env-Key gilt)"
+            onChange={(e) => set("apiKey", e.target.value.trim())}
+            className="w-full border border-coal-700/80 bg-coal-850 py-2.5 pr-10 pl-9 font-mono text-[11px] text-paper-100 placeholder:text-coal-500 focus:border-volt-400/70 focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => setShowKey((v) => !v)}
+            className="absolute top-1/2 right-2.5 -translate-y-1/2 text-coal-400 hover:text-coal-200"
+            aria-label={showKey ? "Key verbergen" : "Key zeigen"}
+          >
+            {showKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+          </button>
+        </div>
+      </Field>
+      <p className="-mt-1 mb-1 font-mono text-[9px] leading-relaxed text-coal-500">
+        MIT SERVER (npm start) BRAUCHST DU DAS HIER NICHT — DER KEY LIEGT SICHER IN DER .env DES
+        RECHNERS. NUR NÜTZLICH, WENN DIE FABRIK REIN STATISCH OHNE SERVER LÄUFT: DANN GEHT DER
+        VERSAND DIREKT AUS DEM BROWSER (BLEIBT IM BROWSER-STORAGE, WIRD NIRGENS HOCHGELADEN).
+      </p>
 
       <div className="grid gap-4 lg:grid-cols-2">
         {/* --------------------------------------------- Wann senden */}
@@ -537,9 +576,11 @@ export default function ShipPanel({
 
           <div className="border border-coal-700/80 bg-coal-850/60 px-3 py-2.5">
             <p className="font-mono text-[9.5px] leading-relaxed text-coal-400">
-              VERSANDWEG: VIDEO → `POST /v1/media/presign` → DIREKTER PUT-UPLOAD → `POST /v1/posts`
-              MIT `mediaItems`. DER API-KEY BLEIBT IN `api/zernio.js` (VERCEL ENV), DER BROWSER
-              SIEHT IHN NIE.
+              {status?.via === "direct"
+                ? "DIREKT-MODUS: DER BROWSER REDET OHNE UMWEG MIT zernio.com (Presign → PUT-Upload → Post). Der Key bleibt lokal in diesem Browser."
+                : "SERVER-MODUS: DER EINGEBAUTE SERVER REICHT ALLES AN zernio.com WEITER. DER KEY LIEGT NUR AUF DIESEM RECHNER IN DER .env, DER BROWSER SIEHT IHN NIE."}{" "}
+              VERSANDWEG: VIDEO → `POST /v1/media/presign` → PUT-UPLOAD → `POST /v1/posts` MIT
+              `mediaItems`.
             </p>
           </div>
         </div>

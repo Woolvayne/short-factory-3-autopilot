@@ -1,13 +1,16 @@
 import { useState } from "react";
 import {
+  AppWindow,
   Captions,
   Clapperboard,
   Eye,
   EyeOff,
+  Lock,
   MessageSquare,
   Mic,
   RotateCcw,
   Scissors,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -28,9 +31,15 @@ import {
   type Settings,
   type StoryStyle,
 } from "../lib/settings";
+import {
+  clearGatePassword,
+  hasGatePassword,
+  setGatePassword,
+  type GateMode,
+} from "../lib/gate";
 import { cn } from "../utils/cn";
 
-type Tab = "ai" | "voice" | "captions" | "intro" | "video" | "clips";
+type Tab = "ai" | "voice" | "captions" | "intro" | "video" | "clips" | "app";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles }[] = [
   { id: "ai", label: "AI", icon: Sparkles },
@@ -39,6 +48,7 @@ const TABS: { id: Tab; label: string; icon: typeof Sparkles }[] = [
   { id: "intro", label: "INTRO", icon: MessageSquare },
   { id: "video", label: "VIDEO", icon: Clapperboard },
   { id: "clips", label: "CLIPS", icon: Scissors },
+  { id: "app", label: "APP", icon: AppWindow },
 ];
 
 function KeyField({
@@ -93,15 +103,50 @@ export default function SettingsPanel({
   settings,
   onChange,
   disabled,
+  gateMode = "off",
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
   disabled?: boolean;
+  /** wie das Passwort-Gate aktuell geschützt ist (server | local | off) */
+  gateMode?: GateMode;
 }) {
   const [tab, setTab] = useState<Tab>("ai");
   const keyed = hasAnyLLMKey(settings);
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     onChange({ ...settings, [k]: v });
+
+  /* lokaler Passwort-Schutz (rein-statischer Modus, kein Server) */
+  const [localGateOn, setLocalGateOn] = useState<boolean>(() => hasGatePassword());
+  const [gatePw, setGatePw] = useState("");
+  const [gatePwBusy, setGatePwBusy] = useState(false);
+  const [gateMsg, setGateMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  const applyGatePassword = async () => {
+    const pw = gatePw.trim();
+    setGateMsg(null);
+    if (pw.length < 4) {
+      setGateMsg({ kind: "err", text: "Mindestens 4 Zeichen." });
+      return;
+    }
+    setGatePwBusy(true);
+    try {
+      await setGatePassword(pw);
+      setLocalGateOn(true);
+      setGatePw("");
+      setGateMsg({ kind: "ok", text: "Lokales Passwort gesetzt — gilt ab dem nächsten Seiten-Reload." });
+    } catch (e) {
+      setGateMsg({ kind: "err", text: String(e instanceof Error ? e.message : e).slice(0, 160) });
+    } finally {
+      setGatePwBusy(false);
+    }
+  };
+
+  const removeGatePassword = () => {
+    clearGatePassword();
+    setLocalGateOn(false);
+    setGateMsg({ kind: "ok", text: "Lokaler Passwort-Schutz entfernt (gilt ab nächstem Reload)." });
+  };
 
   return (
     <Section
@@ -238,6 +283,13 @@ export default function SettingsPanel({
       {tab === "voice" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="grid content-start gap-3">
+            <p className="border border-volt-400/30 bg-volt-400/5 px-3 py-2 font-mono text-[9px] leading-relaxed text-coal-300">
+              STIMMEN-WERKZEUG: MIT SERVER (`npm start`) SPRICHT DER EINGEBAUTE SERVER DIE
+              EDGE-STIMMEN <span className="text-volt-300">INKL. ECHTER WORT-TIMINGS</span>. LÄUFT
+              DIE APP REIN STATISCH (KEIN SERVER), SPRINGT AUTOMATISCH DIE{" "}
+              <span className="text-volt-300">BROWSER-ENGINE</span> EIN — TON GLEICH GUT, TIMINGS
+              GESCHÄTZT.
+            </p>
             <Field label="NARRATOR — EDGE READ ALOUD · FREE · NO KEY">
               <span className="flex items-stretch border border-coal-700/80 bg-coal-850 transition-colors focus-within:border-volt-400/70">
                 <span className="grid w-10 place-items-center border-r border-coal-700/80 text-coal-400">
@@ -798,6 +850,88 @@ export default function SettingsPanel({
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------- APP */}
+      {tab === "app" && (
+        <div className="grid gap-4">
+          <div className="flex items-start gap-3 border border-coal-700/80 bg-coal-850/60 px-3 py-2.5">
+            {localGateOn ? (
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-volt-400" />
+            ) : (
+              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-warn" />
+            )}
+            <div className="font-mono text-[10px] leading-relaxed text-coal-300">
+              <p className="font-bold tracking-widest text-paper-100">
+                SCHUTZ DIESER APP:{" "}
+                {gateMode === "server"
+                  ? "SERVERSEITIG AKTIV (.env APP_PASSWORD)"
+                  : gateMode === "local"
+                    ? "LOKAL AKTIV (DIESES GERÄT)"
+                    : "OFFEN"}
+              </p>
+              <p className="mt-1 text-coal-400">
+                {gateMode === "server"
+                  ? "Empfohlen & aktiv: Das Passwort ist serverseitig (APP_PASSWORD in der .env des eingebauten Servers) — mit IP-Sperre nach mehreren Fehlversuchen. Ändern: .env anpassen, Server neu starten."
+                  : "Kein Server-Passwort gefunden. Mit Server: APP_PASSWORD in die .env schreiben (empfohlen — per IP-Limit vor dem ganzen Netz). Ohne Server kannst du unten einen lokalen Schutz für dieses Gerät setzen."}
+              </p>
+            </div>
+          </div>
+
+          {gateMode !== "server" && (
+            <div className="grid gap-3 border border-coal-700/80 bg-coal-850/40 p-3">
+              <p className="mono-label flex items-center gap-1.5 text-[9px] text-coal-300">
+                <Lock className="size-3" /> LOKALER SCHUTZ (NUR DIESES GERÄT · SHA-256 · KEIN SERVER)
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="password"
+                  value={gatePw}
+                  onChange={(e) => setGatePw(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !gatePwBusy) void applyGatePassword();
+                  }}
+                  minLength={4}
+                  placeholder={localGateOn ? "Neues Passwort (ersetzt das alte)" : "Passwort wählen (min. 4 Zeichen)"}
+                  className="min-w-[220px] flex-1 border border-coal-700/80 bg-coal-850 px-3 py-2.5 font-mono text-[12px] text-paper-100 placeholder:text-coal-500 focus:border-volt-400/70 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void applyGatePassword()}
+                  disabled={disabled || gatePwBusy}
+                  className="bg-heat flex min-h-[38px] items-center gap-1.5 border border-volt-400 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-coal-950 hover:opacity-95 disabled:opacity-40"
+                >
+                  <Lock className="size-3" /> {localGateOn ? "ERSETZEN" : "SETZEN"}
+                </button>
+                {localGateOn && (
+                  <button
+                    type="button"
+                    onClick={removeGatePassword}
+                    disabled={disabled}
+                    className="flex min-h-[38px] items-center gap-1.5 border border-coal-600 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-coal-300 hover:border-rose-err hover:text-rose-err disabled:opacity-40"
+                  >
+                    <Trash2 className="size-3" /> ENTFERNEN
+                  </button>
+                )}
+              </div>
+              {gateMsg && (
+                <p
+                  className={cn(
+                    "font-mono text-[10px] leading-relaxed",
+                    gateMsg.kind === "ok" ? "text-volt-300" : "text-rose-err"
+                  )}
+                >
+                  {gateMsg.text}
+                </p>
+              )}
+              <p className="font-mono text-[9px] leading-relaxed text-coal-500">
+                HINWEIS: Der lokale Schutz ist ein ehrlicher Sichtschutz (Passwort-Hash +
+                Fehlversuch-Sperre auf diesem Gerät). Wer die Browser-Daten löscht, kommt wieder
+                rein — für den Ernstfall nimm den Server-Start (`npm start`) mit APP_PASSWORD.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </Section>

@@ -1,17 +1,21 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "shortsfactory-autopilot",
   "private": true,
-  "version": "0.0.0",
+  "version": "4.0.0",
   "type": "module",
+  "description": "ShortsFactory — One clip in. Ten shorts out. Ein Knopf, ein kleiner Server (Raspberry-Pi-tauglich), Autopilot mit stündlichem Zernio-Versand.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "start": "node scripts/start.mjs",
     "typecheck": "tsc --noEmit",
     "password:hash": "node scripts/hash-password.mjs"
   },
+  "engines": {
+    "node": ">=18.17"
+  },
   "dependencies": {
-    "@supabase/supabase-js": "^2.109.0",
     "clsx": "2.1.1",
     "jszip": "^3.10.1",
     "lucide-react": "^1.41.0",

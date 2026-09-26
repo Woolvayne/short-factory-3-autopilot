@@ -17,15 +17,17 @@ import { humanizeMinutes, type GateStatus } from "../lib/gate";
 import type { ZernioStatus } from "../lib/zernio";
 
 /**
- * Einrichtungs-Assistent — erscheint direkt nach dem ersten Deploy oben in der
- * Fabrik und zeigt in Klartext, was noch fehlt:
+ * Einrichtungs-Assistent — oben in der Fabrik, sagt in Klartext, was fehlt.
+ * Das ganze System läuft mit EINEM Befehl auf dem eigenen Rechner (auch Pi):
  *
- *   1. Passwortschutz   → `APP_PASSWORD` (serverseitig, mit IP-Sperre)
- *   2. Zernio-Versand   → `ZERNIO_API_KEY`
- *   3. Rate-Limit-Store → optional Vercel KV, damit die IP-Sperre global gilt
- *   4. Sendezeiten      → Standard 06:00 / 20:00, frei anpassbar (Panel 06)
+ *     npm start        (oder ./start.sh — baut die App sogar selbst)
  *
- * Vollständige Anleitung mit Copy-&-Paste-Befehlen: docs/EINRICHTUNG.md
+ * Konfiguration passiert in einer einfachen `.env`-Datei im Projektroot:
+ *   1. Passwortschutz   → `APP_PASSWORD=…` (IP-Rate-Limit läuft im Prozess)
+ *   2. Zernio-Versand   → `ZERNIO_API_KEY=sk_…`
+ *   3. Port             → optional `PORT=8080`
+ *
+ * Vollständige Anleitung mit Raspberry-Pi-Quickstart: docs/EINRICHTUNG.md
  */
 export default function SetupPanel({
   gateStatus,
@@ -41,49 +43,39 @@ export default function SetupPanel({
 
   const gateReady = Boolean(gateStatus?.requirePassword);
   const serverGate = gateStatus?.mode === "server";
-  const kvReady = gateStatus?.store === "redis";
+  const localGate = gateStatus?.mode === "local";
+  const serverUp = Boolean(gateStatus?.serverReachable);
   const zernioReady = Boolean(zernioStatus?.configured);
+  const zernioViaEnv = zernioReady && zernioStatus?.via !== "direct";
   const accounts = zernioStatus?.accounts.length ?? 0;
 
   const steps = useMemo(
     () => [
       {
-        id: "gate",
-        ok: gateReady && serverGate,
-        title: "PASSWORT-SCHUTZ",
-        todo: "APP_PASSWORD in Vercel setzen",
-        detail:
-          gateReady && serverGate
-            ? "Serverseitiges Gate aktiv — jedes Neuladen verlangt das Passwort neu."
-            : gateReady
-              ? "Nur lokaler Notbetrieb (kein /api/auth erreichbar) — bitte serverseitig setzen."
-              : "Offen: jeder kann die Seite aufrufen. APP_PASSWORD fehlt.",
-        command: 'npx vercel env add APP_PASSWORD production   # Wert eingeben, dann: vercel --prod',
-      },
-      {
-        id: "rate",
-        ok: Boolean(gateReady && gateStatus && gateStatus.maxAttempts > 0),
-        title: "RATE LIMIT · IP-SPERRE",
-        todo: "Standard aktiv, KV optional",
-        detail: gateStatus
-          ? `${gateStatus.maxAttempts} Fehlversuche → ${humanizeMinutes(
-              gateStatus.schedule[0] ?? 5
-            )} Sperre, danach eskalierend (${gateStatus.schedule
-              .map((m) => humanizeMinutes(m))
-              .join(" → ")}).`
-          : "Zähler wird beim ersten Aufruf geladen.",
-        command: "Fallback ohne KV: Sperre gilt pro Server-Instanz (funktioniert, ist aber nicht global).",
-      },
-      {
-        id: "kv",
-        ok: kvReady,
-        title: "SPERRE GLOBAL (OPTIONAL)",
-        todo: "Vercel KV / Upstash verbinden",
-        detail: kvReady
-          ? "Redis verbunden — die IP-Sperre greift über alle Instanzen."
-          : "Aktuell In-Memory: bei mehreren warmen Instanzen kann die Sperre wackeln.",
+        id: "start",
+        ok: true,
+        title: "APP STARTEN",
+        todo: "ein Befehl genügt",
+        detail: serverUp
+          ? "Der eingebaute Server läuft — App, Stimmen, Passwort-Gate und Zernio-Relay kommen von ihm."
+          : "App läuft ohne Server (rein statisch): Browser-Stimmen aktiv, Versand nur mit App-Key (Panel 06). Empfohlen: npm start.",
         command:
-          "Vercel → Storage → KV anlegen; KV_REST_API_URL + KV_REST_API_TOKEN landen automatisch im Projekt.",
+          "npm start        # baut die App beim ersten Mal selbst und startet den Server (Port 8080)",
+      },
+      {
+        id: "gate",
+        ok: gateReady,
+        title: "PASSWORT-SCHUTZ",
+        todo: serverGate ? "aktiv (.env)" : localGate ? "aktiv (lokal)" : "optional",
+        detail: serverGate
+          ? `${gateStatus?.maxAttempts ?? 5} Fehlversuche → eskalierende Sperre (${(gateStatus?.schedule ?? [5, 15, 60, 360, 1440])
+              .map((m) => humanizeMinutes(m))
+              .join(" → ")}). Läuft im Server-Prozess, Neustart setzt Zähler zurück.`
+          : localGate
+            ? "Lokaler Schutz auf diesem Gerät (kein Server). Für echten IP-Schutz: APP_PASSWORD in die .env."
+            : "Offen: jeder kann die Seite aufrufen. APP_PASSWORD fehlt in der .env.",
+        command:
+          '# .env im Projektroot anlegen:\nAPP_PASSWORD=ganz-langes-passwort   # danach: npm start (Neustart genügt)',
       },
       {
         id: "zernio",
@@ -91,17 +83,18 @@ export default function SetupPanel({
         title: "ZERNIO-VERSAND",
         todo: "ZERNIO_API_KEY + Social-Account",
         detail: !zernioReady
-          ? "Kein Key gesetzt — Versand-Panel ist gesperrt."
+          ? "Kein Key — Versand-Panel ist gesperrt. Key auf zernio.com holen und in die .env schreiben."
           : accounts === 0
-            ? "Key ok, aber kein Social-Account in Zernio verbunden."
-            : `${accounts} Account(s) verbunden und sendebereit.`,
-        command: "npx vercel env add ZERNIO_API_KEY production   # sk_… (ohne VITE_!)",
+            ? `Key ok (${zernioViaEnv ? "Server-.env" : "App-Key"}), aber kein Social-Account in Zernio verbunden.`
+            : `${accounts} Account(s) verbunden — Versand läuft über ${zernioViaEnv ? "die Server-.env" : "den lokalen App-Key"}.`,
+        command:
+          "# .env im Projektroot:\nZERNIO_API_KEY=sk_…   # danach: npm start — Accounts: zernio.com/dashboard",
       },
     ],
-    [gateReady, serverGate, kvReady, gateStatus, zernioReady, accounts]
+    [gateReady, serverGate, localGate, serverUp, gateStatus, zernioReady, zernioViaEnv, accounts]
   );
 
-  const openSteps = steps.filter((s) => !s.ok && s.id !== "kv").length;
+  const openSteps = steps.filter((s) => !s.ok && s.id !== "start").length;
   const allGood = openSteps === 0;
   const maxAttempts = gateStatus?.maxAttempts ?? 5;
   const lockoutSchedule = gateStatus?.schedule?.length
@@ -121,7 +114,7 @@ export default function SetupPanel({
   return (
     <Section
       index="--"
-      title="Einrichtung · nach dem Deploy"
+      title="Einrichtung · ein Server, ein Befehl"
       hint={allGood ? "ALLES EINGERICHTET" : `${openSteps} SCHRITT(E) OFFEN`}
       complete={allGood}
       aside={
@@ -151,19 +144,18 @@ export default function SetupPanel({
           onClick={() => void onOpenShipPanel?.()}
           className="mono-label text-[9.5px] text-volt-300 underline decoration-dotted hover:text-volt-200"
         >
-          → SENDEZEITEN (06:00 / 20:00) IM PANEL 06
+          → SENDEZEITEN IM PANEL 06
         </button>
       </div>
 
       {open && (
         <div className="mt-4 grid gap-3">
           <p className="border border-coal-700/80 bg-coal-950/50 px-3 py-2.5 font-mono text-[10px] leading-relaxed text-coal-300">
-            ANLEITUNG NACH DEM DEPLOYEN: Die Variablen unten in Vercel eintragen (Settings →
-            Environment Variables) und danach <span className="text-volt-300">NEU DEPLOYEN</span> —
-            Environment-Variablen werden beim Build bzw. beim Start der Function gelesen. Ohne
-            <span className="text-volt-300"> APP_PASSWORD</span> ist die Seite offen, ohne
-            <span className="text-volt-300"> ZERNIO_API_KEY</span> geht kein Versand raus.
-            Ausführlich mit Screenshots-Schritten:{" "}
+            Keine Cloud nötig: die komplette Fabrik läuft mit <span className="text-volt-300">npm start</span>{" "}
+            auf dem eigenen Rechner — auch auf einem <span className="text-volt-300">Raspberry Pi</span>.
+            Alles Wichtige landet in einer <span className="text-volt-300">.env</span>-Datei im
+            Projektroot (Beispiel: <span className="text-volt-300">.env.example</span> kopieren).
+            Danach einmal neu starten — mehr ist es nicht. Ausführlich inklusive Pi-Ersteinrichtung:{" "}
             <span className="text-volt-300">docs/EINRICHTUNG.md</span>
           </p>
 
@@ -215,33 +207,36 @@ export default function SetupPanel({
           <div className="grid gap-2 border border-coal-700/80 bg-coal-850/60 px-3 py-2.5 sm:grid-cols-2">
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <Lock className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              PASSWORT WECHSELN: neuen Wert in Vercel setzen → Redeploy (ohne Build-Cache). Sperren
-              laufen dann so: {maxAttempts} VERSUCHE →{" "}
+              PASSWORT WECHSELN: neuen Wert in die .env schreiben → Server neu starten. Sperren
+              laufen so: {maxAttempts} VERSUCHE →{" "}
               {lockoutSchedule.map((m) => humanizeMinutes(m)).join(" → ")}.
+              Werkzeug für einen Hash statt Klartext: `npm run password:hash`.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <KeyRound className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              ZERNIO-BEFEHLE: `npx vercel env add ZERNIO_API_KEY production` · danach Panel 06 prüfen
-              (Button <span className="text-volt-300">API</span>).
+              ZERNIO: Key in die .env → neu starten → Panel 06 prüfen (Button{" "}
+              <span className="text-volt-300">API</span>). Social-Accounts verbindest du auf
+              zernio.com/dashboard.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <ServerCog className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              KEIN VERCEL? `npm run build` → `dist/` ist eine einzige HTML-Datei. Gate + Rate-Limit
-              brauchen aber `/api/auth`, also Vercel (oder Netlify Functions) nutzen.
+              RASPBERRY PI: `git clone` → `./start.sh` → im Browser http://pi-IP:8080 öffnen.
+              Rendern passiert im BROWSER des Geräts vor dem Bildschirm — der Pi muss das Video
+              nicht selbst codieren, er dient nur die App aus.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <Rocket className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              SENDEZEITEN: Panel 06 → <span className="text-volt-300">06 &amp; 20 UHR</span>{" "}
-              (Standard), <span className="text-volt-300">EIGENE ZEIT</span> pro Video oder{" "}
-              <span className="text-volt-300">FLEXIBEL</span> mit Abstand.
+              AUTOPILOT: Panel AP oben — ein Knopf produziert 10 Videos und sendet stündlich.
+              Wichtig: <span className="text-volt-300">Tab offen lassen</span> (Versand-Tab im
+              Vordergrund beim Rendern).
             </p>
           </div>
 
           <p className="flex items-start gap-2 font-mono text-[9px] leading-relaxed text-coal-500">
             <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
-            SICHERHEITSHINWEIS: Das Gate ist ein Sichtschutz plus serverseitige Sperre — kein
-            Bank-Login. Nimm ein langes Passwort und (empfohlen) den KV-Store, damit die IP-Sperre
-            global greift.
+            SICHERHEITSHINWEIS: Das Gate ist ein Sichtschutz plus serverseitige IP-Sperre — kein
+            Bank-Login. Nimm ein langes Passwort. Der Server bindet an 0.0.0.0 (Heimnetz) — willst
+            du ihn von außen erreichbar machen, leg ihn hinter HTTPS (z.B. Caddy/Tailscale).
           </p>
         </div>
       )}

@@ -155,7 +155,11 @@ export function saveSettings(s: Settings): void {
 
 export const hasAnyLLMKey = (s: Settings) => Boolean(s.qwenKey.trim() || s.mistralKey.trim());
 
-/** Edge Read-Aloud neural voices (free, no API key). */
+/**
+ * Neurale Edge-Read-Aloud-Stimmen (kostenlos, kein Key — vom eingebauten
+ * Server ausgesprochen). Läuft die App mal ohne Server (rein statisch), mappt
+ * die Browser-Fallback-Engine diese IDs automatisch auf ihre Stimmen.
+ */
 export const VOICES: { id: string; label: string }[] = [
   { id: "en-US-AndrewNeural", label: "Andrew · US male (Reddit classic)" },
   { id: "en-US-ChristopherNeural", label: "Christopher · US male, deep" },

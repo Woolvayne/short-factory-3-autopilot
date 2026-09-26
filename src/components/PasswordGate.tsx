@@ -217,8 +217,8 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
                 </p>
                 {status.store === "memory" && (
                   <p className="mt-1 text-amber-warn">
-                    HINWEIS: OHNE VERCEL KV GILT DIE SPERRE PRO SERVER-INSTANZ — GLOBAL WIRD ES MIT
-                    KV_REST_API_URL/_TOKEN (SIEHE docs/EINRICHTUNG.md).
+                    HINWEIS: DIE SPERRE LÄUFT IM SERVER-PROZESS (IN-MEMORY) — SIE GILT PRO IP,
+                    SOLANGE DER SERVER LÄUFT, UND WIRD BEIM NEUSTART ZURÜCKGESETZT.
                   </p>
                 )}
               </div>
@@ -267,12 +267,14 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
               <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-amber-warn" />
             )}
             <p className="font-mono text-[9.5px] leading-relaxed text-coal-400">
-              {booting ? "Status wird geprüft…" : info.hint} Passwort ändern: Environment-Variable in
-              Vercel anpassen → neu deployen. Schritt für Schritt:{" "}
-              <span className="text-volt-300">docs/EINRICHTUNG.md</span>
+              {booting ? "Status wird geprüft…" : info.hint}
+              {status?.mode === "server"
+                ? "Passwort ändern: APP_PASSWORD in der .env deines Servers anpassen → Server neu starten."
+                : "Passwort ändern/entfernen: in der App unter Einstellungen → APP."}{" "}
+              Schritt für Schritt: <span className="text-volt-300">docs/EINRICHTUNG.md</span>
               {status?.mode === "server" && status.store === "memory" && (
                 <span className="mt-1 block text-coal-500">
-                  SPERREN GELTEN AKTUELL PRO INSTANZ — MIT VERCEL KV GLOBAL (OPTIONAL, EMPFOHLEN).
+                  SPERREN LAUFEN IM SERVER-PROZESS (IN-MEMORY) — NEUSTART SETZT SIE ZURÜCK.
                 </span>
               )}
             </p>

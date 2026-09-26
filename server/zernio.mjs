@@ -1,5 +1,5 @@
 /**
- * ShortsFactory v3 — Zernio Versandweg (Vercel Serverless Function, Node.js)
+ * ShortsFactory v4 — Zernio Versandweg (eingebauter Server, kein Vercel nötig)
  *
  * Was diese Route tut:
  *   1. `GET  ?action=status`        → ist ZERNIO_API_KEY gesetzt? Welche Accounts
@@ -27,12 +27,7 @@
  */
 
 import crypto from "node:crypto";
-import { authenticateRequest, gateConfigured, gateMode } from "./_lib/gate.js";
-
-export const config = {
-  runtime: "nodejs",
-  maxDuration: 60,
-};
+import { authenticateRequest, gateConfigured, gateMode } from "./gate.mjs";
 
 const BASE_URL = (process.env.ZERNIO_BASE_URL || "https://zernio.com/api/v1").replace(/\/+$/, "");
 const API_KEY = (process.env.ZERNIO_API_KEY || "").trim();
@@ -40,7 +35,7 @@ const API_KEY = (process.env.ZERNIO_API_KEY || "").trim();
 /* ------------------------------------------------------------------ */
 /*  Gate: dasselbe Passwort wie der Onepage-Schutz                     */
 /*                                                                     */
-/*  Geprüft wird in `api/_lib/gate.js` — dort liegen Passwort-Abgleich, */
+/*  Geprüft wird in `server/gate.mjs` — dort liegen Passwort-Abgleich,     */
 /*  Token-Signatur und das IP-Rate-Limit. Hier wird nur entschieden,    */
 /*  ob die Anfrage durch darf.                                          */
 /* ------------------------------------------------------------------ */
@@ -96,7 +91,7 @@ function readRawBody(req) {
     req.on("data", (c) => {
       const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
       size += buf.length;
-      if (size > 4.4 * 1024 * 1024) {
+      if (size > 512 * 1024 * 1024) {
         reject(new Error("PAYLOAD_TOO_LARGE"));
         req.destroy();
         return;
@@ -178,7 +173,7 @@ export default async function handler(req, res) {
       ok: false,
       configured: false,
       error:
-        "ZERNIO_API_KEY fehlt. In Vercel → Settings → Environment Variables setzen und neu deployen (Anleitung: docs/ANLEITUNG.md).",
+        "ZERNIO_API_KEY fehlt. In die .env im Projektroot eintragen und den Server neu starten (Anleitung: docs/EINRICHTUNG.md) — oder den Key direkt im Panel 06 der App eintippen.",
     });
   }
 
@@ -209,7 +204,7 @@ export default async function handler(req, res) {
       if (!bytes.length) {
         return json(400, {
           ok: false,
-          error: "Keine Video-Bytes angekommen (Body-Limit von Vercel: 4,5 MB).",
+          error: "Keine Video-Bytes angekommen (Server-Limit: 512 MB).",
         });
       }
 
