@@ -545,7 +545,7 @@ export default function ShipDialog({
               <span className="font-mono text-[9.5px] text-amber-warn">
                 {status?.configured
                   ? "KEY OK, ABER KEIN SOCIAL-ACCOUNT VERBUNDEN → zernio.com/dashboard"
-                  : (status?.error ?? "ZERNIO_API_KEY FEHLT → VERCEL ENV SETZEN + NEU DEPLOYEN").slice(0, 160)}
+                  : (status?.error ?? "KEIN ZERNIO-API-KEY → PANEL 06 → API-KEY EINTRAGEN").slice(0, 160)}
               </span>
             )}
           </div>
@@ -563,7 +563,7 @@ export default function ShipDialog({
           <p className="font-mono text-[9px] leading-relaxed tracking-wider text-coal-500">
             {plan.asDraft ? "ENTWURF · " : ""}
             {count > 1 ? `${SHIP_GAP_MS / 1000} s TAKT ZWISCHEN JEDEM VIDEO · ` : ""}
-            UPLOAD → `POST /v1/posts` · KEY BLEIBT SERVERSEITIG
+            UPLOAD → `POST /v1/posts` · KEY BLEIBT NUR IM BROWSER DIESES GERÄTS
           </p>
           <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
             <button
@@ -579,7 +579,7 @@ export default function ShipDialog({
               disabled={!canSend || !status?.configured || accounts.length === 0}
               title={
                 !status?.configured
-                  ? "ZERNIO_API_KEY fehlt"
+                  ? "Kein Zernio-API-Key — Panel 06 → API-KEY eintragen"
                   : accounts.length === 0
                     ? "Kein Social-Account bei Zernio verbunden"
                     : summary

@@ -22,4 +22,10 @@ export default defineConfig({
     /* Preview-Proxies (z. B. *.e2b.app) dürfen den Devserver einbetten. */
     allowedHosts: [".e2b.app", "localhost", "127.0.0.1"],
   },
+  preview: {
+    host: true,
+    port: 8080,
+    /* dasselbe für `vite preview` (statisches Testen des Builds) */
+    allowedHosts: [".e2b.app", "localhost", "127.0.0.1"],
+  },
 });

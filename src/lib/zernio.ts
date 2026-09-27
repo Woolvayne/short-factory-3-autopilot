@@ -1,28 +1,19 @@
 /**
- * Zernio Versandweg — zwei Wege, automatisch gewählt:
+ * Zernio Versandweg — läuft komplett im Browser, kein Server nötig: Der
+ * API-Key wird einmal im Panel `06 · Versand` eingetippt und liegt danach nur
+ * im localStorage DIESES Geräts; alle Aufrufe gehen direkt an
+ * `https://zernio.com/api/v1`.
  *
- *   1. **Eingebauter Server** (`npm start` auf dem Pi/Heimserver): Der API-Key
- *      liegt als `ZERNIO_API_KEY` in der `.env` des Servers und verlässt ihn
- *      nie. Der Browser redet same-origin mit `/api/zernio` — Passwort-Gate
- *      inklusive, Upload-Relay als Notnagel für blockierte Direktuploads.
- *   2. **Rein statische Seite** (kein Server): Der Key wird einmal im Panel
- *      `06 · Versand` eingetippt und liegt im localStorage DIESES Geräts;
- *      alle Aufrufe gehen danach direkt an `https://zernio.com/api/v1`.
- *
- * Der Rest ist identisch: presign → PUT-Upload → `POST /v1/posts` (sofort,
- * geplant oder Entwurf), dazwischen exakt `SHIP_GAP_MS` = 3 Sekunden Takt.
- * Die Zeitrechnerei (Europe/Berlin, Slot-Pläne) ist unverändert.
+ * presign → PUT-Upload → `POST /v1/posts` (sofort, geplant oder Entwurf),
+ * dazwischen exakt `SHIP_GAP_MS` = 3 Sekunden Takt. Die Zeitrechnerei
+ * (Europe/Berlin, Slot-Pläne) ist unverändert.
  *
  * API-Doku: https://docs.zernio.com · https://zernio.com/llms.txt
  */
 
-import { gateHeaders, notifyGateExpired } from "./gate";
-import { probeBackend } from "./relay";
 import { sleep } from "./media";
 import type { LocalRenderItem } from "./types";
 
-const RELAY_ENDPOINT = "/api/zernio";
-const RELAY_UPLOAD_ENDPOINT = "/api/zernio/upload";
 const DIRECT_BASE_URL = "https://zernio.com/api/v1";
 
 /** Pflicht-Pause zwischen zwei Videos — exakt 3 Sekunden. */
@@ -43,9 +34,8 @@ export interface ZernioStatus {
   ok: boolean;
   configured: boolean;
   accounts: ZernioAccount[];
-  /** "relay" = Key auf dem Server (.env) · "direct" = Key in der App (localStorage) */
-  via?: "relay" | "direct";
-  gate?: boolean;
+  /** immer "direct" — der Key liegt ausschließlich im localStorage dieses Geräts */
+  via?: "direct";
   error?: string;
   /** true, wenn der Browser Zernio gar nicht erreicht hat (Netzwerk/CORS) */
   unreachable?: boolean;
@@ -395,32 +385,6 @@ function markUnreachable(e: unknown): Error {
 export const isUnreachableError = (e: unknown): boolean =>
   e instanceof Error && e.name === "UNREACHABLE";
 
-/** Aufruf über das Server-Relay (Key bleibt auf dem Server). */
-async function relayCall<T>(path: string, init?: RequestInit): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      ...init,
-      headers: {
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...gateHeaders(),
-        ...(init?.headers ?? {}),
-      },
-    });
-  } catch {
-    throw new Error(NETWORK_ERROR);
-  }
-  const data = await res.json().catch(() => null);
-  if (!res.ok || data?.ok === false) {
-    /* 401 = Sitzungs-Token abgelaufen/fehlt → App zurück auf die Passwort-Seite. */
-    if (res.status === 401) notifyGateExpired();
-    throw new Error(
-      typeof data?.error === "string" ? data.error : `Zernio-Route HTTP ${res.status}`
-    );
-  }
-  return data as T;
-}
-
 const extractErrorMessage = (data: Record<string, unknown> | null, status: number): string =>
   (typeof (data?.error as { message?: string } | undefined)?.message === "string" &&
     (data?.error as { message?: string }).message) ||
@@ -512,38 +476,8 @@ const normalizeAccounts = (payload: unknown): ZernioAccount[] => {
 const postableAccounts = (accounts: ZernioAccount[]) =>
   accounts.filter((a) => a.isActive && POSTING_PLATFORMS.has(a.platform));
 
-/**
- * Status-Check: Key gültig? Welche Accounts sind verbunden?
- * Wählt automatisch Relay (Server-.env) oder Direktmodus (App-Key).
- */
+/** Status-Check: Key gültig? Welche Accounts sind verbunden? (Key aus der App/localStorage) */
 export async function fetchZernioStatus(cfg: Pick<ShipConfig, "apiKey">): Promise<ZernioStatus> {
-  /* Weg 1: eingebauter Server → Status inkl. ob ZERNIO_API_KEY in der .env liegt */
-  if (await probeBackend()) {
-    try {
-      const data = await relayCall<{
-        configured: boolean;
-        accounts: ZernioAccount[];
-        gate?: boolean;
-      }>(`${RELAY_ENDPOINT}?action=status`);
-      return {
-        ok: true,
-        configured: Boolean(data?.configured),
-        accounts: Array.isArray(data?.accounts) ? data.accounts : [],
-        gate: Boolean(data?.gate),
-        via: "relay",
-      };
-    } catch (e) {
-      return {
-        ok: false,
-        configured: false,
-        accounts: [],
-        via: "relay",
-        error: e instanceof Error ? e.message : String(e),
-      };
-    }
-  }
-
-  /* Weg 2: kein Server → Key aus der App (localStorage) */
   const key = cfg.apiKey.trim();
   if (!key) return { ok: true, configured: false, accounts: [], via: "direct" };
   try {
@@ -581,12 +515,6 @@ async function presignMedia(
   contentType: string,
   size: number
 ): Promise<PresignResponse> {
-  if (await probeBackend()) {
-    return relayCall<PresignResponse>(RELAY_ENDPOINT, {
-      method: "POST",
-      body: JSON.stringify({ action: "presign", filename, contentType, size }),
-    });
-  }
   const key = cfg.apiKey.trim();
   if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
   const data = await directCall<Record<string, unknown>>("/media/presign", key, {
@@ -636,29 +564,6 @@ async function publishPost(
   cfg: Pick<ShipConfig, "apiKey">,
   input: PublishInput
 ): Promise<PublishResult> {
-  /* Weg 1: Relay übernimmt Payload+Account-Auto-Auswahl wie bisher */
-  if (await probeBackend()) {
-    return relayCall<PublishResult>(RELAY_ENDPOINT, {
-      method: "POST",
-      body: JSON.stringify({
-        action: "publish",
-        mediaUrl: input.mediaUrl,
-        filename: input.filename,
-        mimeType: input.mimeType,
-        size: input.size,
-        content: input.content,
-        title: input.title,
-        hashtags: input.hashtags,
-        tags: input.tags ?? [],
-        platforms: input.platforms ?? [],
-        isDraft: input.asDraft,
-        scheduledFor: input.slot.wall ?? undefined,
-        timezone: input.slot.wall ? (input.timezone ?? SHIP_TIMEZONE) : undefined,
-      }),
-    });
-  }
-
-  /* Weg 2: direkt — Payload hier im Browser bauen */
   const key = cfg.apiKey.trim();
   if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
 
@@ -736,12 +641,6 @@ async function publishPost(
 }
 
 export async function fetchPostStatus(cfg: Pick<ShipConfig, "apiKey">, postId: string) {
-  if (await probeBackend()) {
-    return relayCall<{ postId: string; status: string }>(RELAY_ENDPOINT, {
-      method: "POST",
-      body: JSON.stringify({ action: "post-status", postId }),
-    });
-  }
   const key = cfg.apiKey.trim();
   if (!key) throw new Error("Kein Zernio-API-Key — unter 06 · VERSAND eintragen (sk_…).");
   const data = await directCall<Record<string, unknown>>(
@@ -801,8 +700,8 @@ function xhrUpload(
 
 /**
  * Lädt ein Video zu Zernio und liefert die öffentliche URL für den Post.
- * Primär direkter PUT auf die presignierte Storage-URL (bis 5 GB). Läuft ein
- * eigener Server greift bei CORS-Ärger automatisch sein Upload-Relay.
+ * Direkter PUT auf die presignierte Storage-URL (bis 5 GB) — komplett aus
+ * dem Browser, kein Zwischenserver.
  */
 export async function uploadVideoBlob(
   cfg: Pick<ShipConfig, "apiKey">,
@@ -811,7 +710,6 @@ export async function uploadVideoBlob(
   contentType: string,
   onProgress?: (ratio: number) => void
 ): Promise<string> {
-  const relay = await probeBackend();
   const presign = await presignMedia(cfg, filename, contentType, blob.size);
 
   try {
@@ -820,26 +718,8 @@ export async function uploadVideoBlob(
   } catch (e) {
     const network = e instanceof Error && e.message === NETWORK_ERROR;
     if (!network) throw e instanceof Error ? e : new Error(String(e));
-
-    if (relay && presign.sig) {
-      /* Notnagel: derselbe Upload durch den eigenen Server (kein Vercel-Limit) */
-      await xhrUpload(
-        RELAY_UPLOAD_ENDPOINT,
-        "POST",
-        blob,
-        {
-          ...gateHeaders(),
-          "x-sf-target": presign.uploadUrl,
-          "x-sf-sig": presign.sig,
-          "x-sf-content-type": contentType,
-        },
-        onProgress
-      );
-      return presign.publicUrl;
-    }
-
     throw new Error(
-      "Der Storage-Upload ist aus dem Browser gescheitert (Netzwerk/CORS). Bitte Verbindung prüfen — oder mit dem eingebauten Server starten (`npm start`), dann greift das Upload-Relay."
+      "Der Storage-Upload ist aus dem Browser gescheitert (Netzwerk/CORS). Bitte Internet-Verbindung prüfen und Tracking-Blocker für diese Seite testweise deaktivieren."
     );
   }
 }
@@ -916,10 +796,8 @@ export async function shipVideo(
   hooks: ShipHooks
 ): Promise<ShipResult> {
   if (!item.blob) throw new Error("Dieses Unit ist noch nicht gerendert.");
-  if (!(await probeBackend()) && !cfg.apiKey.trim()) {
-    throw new Error(
-      "Kein Zernio-API-Key — entweder ZERNIO_API_KEY in die .env des Servers oder unten im Panel 06 eintragen (sk_…)."
-    );
+  if (!cfg.apiKey.trim()) {
+    throw new Error("Kein Zernio-API-Key — unten im Panel 06 eintragen (sk_…).");
   }
 
   const filename = shipFileName(item);

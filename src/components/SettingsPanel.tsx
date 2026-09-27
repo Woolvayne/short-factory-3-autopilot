@@ -108,7 +108,7 @@ export default function SettingsPanel({
   settings: Settings;
   onChange: (s: Settings) => void;
   disabled?: boolean;
-  /** wie das Passwort-Gate aktuell geschützt ist (server | local | off) */
+  /** wie das Passwort-Gate aktuell geschützt ist (local | off) */
   gateMode?: GateMode;
 }) {
   const [tab, setTab] = useState<Tab>("ai");
@@ -116,7 +116,7 @@ export default function SettingsPanel({
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     onChange({ ...settings, [k]: v });
 
-  /* lokaler Passwort-Schutz (rein-statischer Modus, kein Server) */
+  /* lokaler Passwort-Schutz — läuft komplett im Browser dieses Geräts */
   const [localGateOn, setLocalGateOn] = useState<boolean>(() => hasGatePassword());
   const [gatePw, setGatePw] = useState("");
   const [gatePwBusy, setGatePwBusy] = useState(false);
@@ -284,11 +284,9 @@ export default function SettingsPanel({
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="grid content-start gap-3">
             <p className="border border-volt-400/30 bg-volt-400/5 px-3 py-2 font-mono text-[9px] leading-relaxed text-coal-300">
-              STIMMEN-WERKZEUG: MIT SERVER (`npm start`) SPRICHT DER EINGEBAUTE SERVER DIE
-              EDGE-STIMMEN <span className="text-volt-300">INKL. ECHTER WORT-TIMINGS</span>. LÄUFT
-              DIE APP REIN STATISCH (KEIN SERVER), SPRINGT AUTOMATISCH DIE{" "}
-              <span className="text-volt-300">BROWSER-ENGINE</span> EIN — TON GLEICH GUT, TIMINGS
-              GESCHÄTZT.
+              STIMMEN-WERKZEUG: SPRICHT KOMPLETT IM <span className="text-volt-300">BROWSER</span>{" "}
+              — KEIN SERVER, KEIN KEY NÖTIG. TON GLEICH GUT AUF JEDEM GERÄT, DIE WORT-TIMINGS
+              WERDEN AUS DER GEMESSENEN AUDIO-DAUER GESCHÄTZT.
             </p>
             <Field label="NARRATOR — EDGE READ ALOUD · FREE · NO KEY">
               <span className="flex items-stretch border border-coal-700/80 bg-coal-850 transition-colors focus-within:border-volt-400/70">
@@ -865,21 +863,17 @@ export default function SettingsPanel({
             <div className="font-mono text-[10px] leading-relaxed text-coal-300">
               <p className="font-bold tracking-widest text-paper-100">
                 SCHUTZ DIESER APP:{" "}
-                {gateMode === "server"
-                  ? "SERVERSEITIG AKTIV (.env APP_PASSWORD)"
-                  : gateMode === "local"
-                    ? "LOKAL AKTIV (DIESES GERÄT)"
-                    : "OFFEN"}
+                {gateMode === "local" ? "LOKAL AKTIV (DIESES GERÄT)" : "OFFEN"}
               </p>
               <p className="mt-1 text-coal-400">
-                {gateMode === "server"
-                  ? "Empfohlen & aktiv: Das Passwort ist serverseitig (APP_PASSWORD in der .env des eingebauten Servers) — mit IP-Sperre nach mehreren Fehlversuchen. Ändern: .env anpassen, Server neu starten."
-                  : "Kein Server-Passwort gefunden. Mit Server: APP_PASSWORD in die .env schreiben (empfohlen — per IP-Limit vor dem ganzen Netz). Ohne Server kannst du unten einen lokalen Schutz für dieses Gerät setzen."}
+                {gateMode === "local"
+                  ? "Passwort als Hash auf diesem Gerät (kein Server, kein Upload) — mit Sperre nach mehreren Fehlversuchen. Ändern/entfernen: unten."
+                  : "Kein Passwort gesetzt — die App ist offen. Unten kannst du einen Schutz für dieses Gerät einrichten."}
               </p>
             </div>
           </div>
 
-          {gateMode !== "server" && (
+          {(
             <div className="grid gap-3 border border-coal-700/80 bg-coal-850/40 p-3">
               <p className="mono-label flex items-center gap-1.5 text-[9px] text-coal-300">
                 <Lock className="size-3" /> LOKALER SCHUTZ (NUR DIESES GERÄT · SHA-256 · KEIN SERVER)
@@ -926,9 +920,9 @@ export default function SettingsPanel({
                 </p>
               )}
               <p className="font-mono text-[9px] leading-relaxed text-coal-500">
-                HINWEIS: Der lokale Schutz ist ein ehrlicher Sichtschutz (Passwort-Hash +
-                Fehlversuch-Sperre auf diesem Gerät). Wer die Browser-Daten löscht, kommt wieder
-                rein — für den Ernstfall nimm den Server-Start (`npm start`) mit APP_PASSWORD.
+                HINWEIS: Das ist ein ehrlicher Sichtschutz (Passwort-Hash + Fehlversuch-Sperre auf
+                diesem Gerät), kein Bank-Login. Wer die Browser-Daten dieses Geräts löscht, kommt
+                wieder rein.
               </p>
             </div>
           )}

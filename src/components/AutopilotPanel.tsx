@@ -6,6 +6,7 @@ import {
   Hourglass,
   Loader2,
   Mic,
+  MonitorCheck,
   Play,
   Rocket,
   Send,
@@ -97,18 +98,24 @@ export default function AutopilotPanel({
   footageReady,
   onStart,
   onStop,
+  wakeLockActive,
+  wakeLockSupported,
 }: {
   cfg: AutopilotConfig;
   onCfgChange: (cfg: AutopilotConfig) => void;
   state: AutopilotState;
   items: LocalRenderItem[];
   shipStates: Record<number, ShipState>;
-  /** Server-.env oder App-Key gesetzt und mind. ein Account verbunden */
+  /** App-Key gesetzt und mind. ein Account verbunden */
   zernioReady: boolean;
   /** Quellvideo bzw. 10 Dateien sind geladen */
   footageReady: boolean;
   onStart: () => void;
   onStop: () => void;
+  /** Screen-Wake-Lock hält Bildschirm gerade aktiv wach */
+  wakeLockActive?: boolean;
+  /** true, wenn dieser Browser die Wake-Lock-API überhaupt unterstützt */
+  wakeLockSupported?: boolean;
 }) {
   const running = state.running;
   const scripted = items.filter((i) => i.story).length;
@@ -200,8 +207,9 @@ export default function AutopilotPanel({
             RENDERN → DANN ALLE {cfg.intervalMinutes} MIN JE {cfg.perWave} VIDEO
             {cfg.perWave > 1 ? "S" : ""} AN ZERNIO (nach den Einstellungen aus 00 &amp; 06).
             WICHTIG: <span className="text-amber-warn">DIESEN TAB OFFEN LASSEN</span> — die Fabrik
-            rendert und versendet nur bei geöffnetem Tab (er sollte beim Rendern im Vordergrund
-            bleiben).
+            rendert und versendet nur bei geöffnetem Tab. Die App hält den Bildschirm dafür per
+            Wake-Lock automatisch wach; unterstützt der Browser das nicht, bitte den
+            Auto-Standby des Geräts selbst kurz deaktivieren.
           </p>
         </div>
 
@@ -246,8 +254,29 @@ export default function AutopilotPanel({
               {zernioReady ? <BadgeCheck className="size-3" /> : <TriangleAlert className="size-3" />}
               ZERNIO
             </span>
-            <span className="flex items-center gap-1.5 text-coal-500">
-              <TimerReset className="size-3" /> TAB OFFEN LASSEN
+            <span
+              className={cn(
+                "flex items-center gap-1.5",
+                wakeLockActive ? "text-volt-300" : running ? "text-amber-warn" : "text-coal-500"
+              )}
+              title={
+                wakeLockActive
+                  ? "Wake-Lock aktiv — Bildschirm bleibt wach"
+                  : wakeLockSupported === false
+                    ? "Dieser Browser unterstützt keinen Wake-Lock — Auto-Standby manuell deaktivieren"
+                    : "Tab & Bildschirm müssen offen/wach bleiben"
+              }
+            >
+              {wakeLockActive ? (
+                <MonitorCheck className="size-3" />
+              ) : (
+                <TimerReset className="size-3" />
+              )}
+              {wakeLockActive
+                ? "BILDSCHIRM WACH (WAKE-LOCK)"
+                : running && wakeLockSupported === false
+                  ? "TAB OFFEN LASSEN · KEIN WAKE-LOCK"
+                  : "TAB OFFEN LASSEN"}
             </span>
           </div>
 
