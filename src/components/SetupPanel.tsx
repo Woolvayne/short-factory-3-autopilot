@@ -6,8 +6,8 @@ import {
   Copy,
   KeyRound,
   Lock,
+  MonitorSmartphone,
   Rocket,
-  ServerCog,
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
@@ -18,16 +18,16 @@ import type { ZernioStatus } from "../lib/zernio";
 
 /**
  * Einrichtungs-Assistent — oben in der Fabrik, sagt in Klartext, was fehlt.
- * Das ganze System läuft mit EINEM Befehl auf dem eigenen Rechner (auch Pi):
  *
- *     npm start        (oder ./start.sh — baut die App sogar selbst)
+ * Die App ist eine reine Web-App: einmal im Browser öffnen (fertiger Build,
+ * z. B. dist/index.html oder ein beliebiger Static-Host) — kein Server, kein
+ * Node-Prozess, kein Raspberry-Pi-Setup nötig. Läuft überall, wo ein
+ * aktueller Browser läuft, auch auf sehr schwacher Hardware.
  *
- * Konfiguration passiert in einer einfachen `.env`-Datei im Projektroot:
- *   1. Passwortschutz   → `APP_PASSWORD=…` (IP-Rate-Limit läuft im Prozess)
- *   2. Zernio-Versand   → `ZERNIO_API_KEY=sk_…`
- *   3. Port             → optional `PORT=8080`
+ * Passwortschutz und Zernio-Versand werden direkt in der App eingerichtet
+ * (Panel APP bzw. 06) und bleiben nur im localStorage dieses Geräts.
  *
- * Vollständige Anleitung mit Raspberry-Pi-Quickstart: docs/EINRICHTUNG.md
+ * Vollständige Anleitung: docs/EINRICHTUNG.md
  */
 export default function SetupPanel({
   gateStatus,
@@ -42,59 +42,50 @@ export default function SetupPanel({
   const [copied, setCopied] = useState<string | null>(null);
 
   const gateReady = Boolean(gateStatus?.requirePassword);
-  const serverGate = gateStatus?.mode === "server";
   const localGate = gateStatus?.mode === "local";
-  const serverUp = Boolean(gateStatus?.serverReachable);
   const zernioReady = Boolean(zernioStatus?.configured);
-  const zernioViaEnv = zernioReady && zernioStatus?.via !== "direct";
   const accounts = zernioStatus?.accounts.length ?? 0;
 
   const steps = useMemo(
     () => [
       {
-        id: "start",
+        id: "open",
         ok: true,
-        title: "APP STARTEN",
-        todo: "ein Befehl genügt",
-        detail: serverUp
-          ? "Der eingebaute Server läuft — App, Stimmen, Passwort-Gate und Zernio-Relay kommen von ihm."
-          : "App läuft ohne Server (rein statisch): Browser-Stimmen aktiv, Versand nur mit App-Key (Panel 06). Empfohlen: npm start.",
-        command:
-          "npm start        # baut die App beim ersten Mal selbst und startet den Server (Port 8080)",
+        title: "APP ÖFFNEN",
+        todo: "kein Install nötig",
+        detail:
+          "100 % im Browser: Seite einmal öffnen (auch offline als Datei) und loslegen. Kein Server, kein Terminal-Befehl.",
+        command: "# nichts zu tun — einfach im Browser geöffnet lassen",
       },
       {
         id: "gate",
         ok: gateReady,
         title: "PASSWORT-SCHUTZ",
-        todo: serverGate ? "aktiv (.env)" : localGate ? "aktiv (lokal)" : "optional",
-        detail: serverGate
-          ? `${gateStatus?.maxAttempts ?? 5} Fehlversuche → eskalierende Sperre (${(gateStatus?.schedule ?? [5, 15, 60, 360, 1440])
+        todo: localGate ? "aktiv (dieses Gerät)" : "optional",
+        detail: localGate
+          ? `Lokaler Schutz auf diesem Gerät aktiv: ${gateStatus?.maxAttempts ?? 5} Fehlversuche → eskalierende Sperre (${(gateStatus?.schedule ?? [5, 15, 60, 360, 1440])
               .map((m) => humanizeMinutes(m))
-              .join(" → ")}). Läuft im Server-Prozess, Neustart setzt Zähler zurück.`
-          : localGate
-            ? "Lokaler Schutz auf diesem Gerät (kein Server). Für echten IP-Schutz: APP_PASSWORD in die .env."
-            : "Offen: jeder kann die Seite aufrufen. APP_PASSWORD fehlt in der .env.",
-        command:
-          '# .env im Projektroot anlegen:\nAPP_PASSWORD=ganz-langes-passwort   # danach: npm start (Neustart genügt)',
+              .join(" → ")}).`
+          : "Offen: jeder mit dem Link kann die Seite aufrufen. Optional unter Einstellungen → APP absichern.",
+        command: "Einstellungen → APP → Passwort setzen",
       },
       {
         id: "zernio",
         ok: zernioReady && accounts > 0,
         title: "ZERNIO-VERSAND",
-        todo: "ZERNIO_API_KEY + Social-Account",
+        todo: "API-Key + Social-Account",
         detail: !zernioReady
-          ? "Kein Key — Versand-Panel ist gesperrt. Key auf zernio.com holen und in die .env schreiben."
+          ? "Kein Key — Versand-Panel ist gesperrt. Key auf zernio.com holen und im Panel 06 eintragen."
           : accounts === 0
-            ? `Key ok (${zernioViaEnv ? "Server-.env" : "App-Key"}), aber kein Social-Account in Zernio verbunden.`
-            : `${accounts} Account(s) verbunden — Versand läuft über ${zernioViaEnv ? "die Server-.env" : "den lokalen App-Key"}.`,
-        command:
-          "# .env im Projektroot:\nZERNIO_API_KEY=sk_…   # danach: npm start — Accounts: zernio.com/dashboard",
+            ? "Key ok, aber kein Social-Account in Zernio verbunden."
+            : `${accounts} Account(s) verbunden — Versand läuft direkt aus diesem Browser.`,
+        command: "Panel 06 · VERSAND → API-KEY eintragen (sk_…)",
       },
     ],
-    [gateReady, serverGate, localGate, serverUp, gateStatus, zernioReady, zernioViaEnv, accounts]
+    [gateReady, localGate, gateStatus, zernioReady, accounts]
   );
 
-  const openSteps = steps.filter((s) => !s.ok && s.id !== "start").length;
+  const openSteps = steps.filter((s) => !s.ok && s.id !== "open").length;
   const allGood = openSteps === 0;
   const maxAttempts = gateStatus?.maxAttempts ?? 5;
   const lockoutSchedule = gateStatus?.schedule?.length
@@ -114,7 +105,7 @@ export default function SetupPanel({
   return (
     <Section
       index="--"
-      title="Einrichtung · ein Server, ein Befehl"
+      title="Einrichtung · nur ein Browser"
       hint={allGood ? "ALLES EINGERICHTET" : `${openSteps} SCHRITT(E) OFFEN`}
       complete={allGood}
       aside={
@@ -151,11 +142,13 @@ export default function SetupPanel({
       {open && (
         <div className="mt-4 grid gap-3">
           <p className="border border-coal-700/80 bg-coal-950/50 px-3 py-2.5 font-mono text-[10px] leading-relaxed text-coal-300">
-            Keine Cloud nötig: die komplette Fabrik läuft mit <span className="text-volt-300">npm start</span>{" "}
-            auf dem eigenen Rechner — auch auf einem <span className="text-volt-300">Raspberry Pi</span>.
-            Alles Wichtige landet in einer <span className="text-volt-300">.env</span>-Datei im
-            Projektroot (Beispiel: <span className="text-volt-300">.env.example</span> kopieren).
-            Danach einmal neu starten — mehr ist es nicht. Ausführlich inklusive Pi-Ersteinrichtung:{" "}
+            Keine Cloud, kein Server, kein Node nötig: Die komplette Fabrik läuft{" "}
+            <span className="text-volt-300">100 % im Browser</span> dieses Geräts — Ideen,
+            Skripte, Stimmen und Video-Render passieren alle hier, nichts wird irgendwohin
+            hochgeladen (außer beim Versand über Zernio, Panel 06). Passwort und API-Key liegen
+            ausschließlich im <span className="text-volt-300">localStorage</span> dieses Geräts.
+            Leichtgewichtig genug für jeden alten Laptop, ein Tablet oder einen Raspberry Pi —
+            solange ein aktueller Browser läuft. Ausführlich:{" "}
             <span className="text-volt-300">docs/EINRICHTUNG.md</span>
           </p>
 
@@ -190,7 +183,7 @@ export default function SetupPanel({
                     </>
                   ) : (
                     <>
-                      <Copy className="size-3" /> BEFEHL
+                      <Copy className="size-3" /> HINWEIS
                     </>
                   )}
                 </button>
@@ -207,36 +200,32 @@ export default function SetupPanel({
           <div className="grid gap-2 border border-coal-700/80 bg-coal-850/60 px-3 py-2.5 sm:grid-cols-2">
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <Lock className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              PASSWORT WECHSELN: neuen Wert in die .env schreiben → Server neu starten. Sperren
-              laufen so: {maxAttempts} VERSUCHE →{" "}
-              {lockoutSchedule.map((m) => humanizeMinutes(m)).join(" → ")}.
-              Werkzeug für einen Hash statt Klartext: `npm run password:hash`.
+              PASSWORT WECHSELN/ENTFERNEN: Einstellungen → APP. Sperren laufen so: {maxAttempts}{" "}
+              VERSUCHE → {lockoutSchedule.map((m) => humanizeMinutes(m)).join(" → ")}.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <KeyRound className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              ZERNIO: Key in die .env → neu starten → Panel 06 prüfen (Button{" "}
-              <span className="text-volt-300">API</span>). Social-Accounts verbindest du auf
-              zernio.com/dashboard.
+              ZERNIO: Key im Panel 06 eintragen (Button <span className="text-volt-300">API</span>{" "}
+              prüft die Verbindung). Social-Accounts verbindest du auf zernio.com/dashboard.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
-              <ServerCog className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
-              RASPBERRY PI: `git clone` → `./start.sh` → im Browser http://pi-IP:8080 öffnen.
-              Rendern passiert im BROWSER des Geräts vor dem Bildschirm — der Pi muss das Video
-              nicht selbst codieren, er dient nur die App aus.
+              <MonitorSmartphone className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
+              JEDES GERÄT: Ob PC, altes Notebook, Tablet oder Raspberry-Pi-Browser — das Rendern
+              passiert im Canvas des Tabs, dafür reicht schwache Hardware locker. Kein Setup außer
+              „Seite öffnen“.
             </p>
             <p className="flex items-start gap-2 font-mono text-[9.5px] leading-relaxed text-coal-300">
               <Rocket className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
               AUTOPILOT: Panel AP oben — ein Knopf produziert 10 Videos und sendet stündlich.
-              Wichtig: <span className="text-volt-300">Tab offen lassen</span> (Versand-Tab im
-              Vordergrund beim Rendern).
+              Wichtig: <span className="text-volt-300">Tab & Bildschirm offen lassen</span> — die
+              App versucht das per Wake-Lock automatisch zu sichern.
             </p>
           </div>
 
           <p className="flex items-start gap-2 font-mono text-[9px] leading-relaxed text-coal-500">
             <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
-            SICHERHEITSHINWEIS: Das Gate ist ein Sichtschutz plus serverseitige IP-Sperre — kein
-            Bank-Login. Nimm ein langes Passwort. Der Server bindet an 0.0.0.0 (Heimnetz) — willst
-            du ihn von außen erreichbar machen, leg ihn hinter HTTPS (z.B. Caddy/Tailscale).
+            SICHERHEITSHINWEIS: Das Gate ist ein Sichtschutz auf diesem Gerät — kein Bank-Login.
+            Nimm ein langes Passwort. Wer Browser-Daten dieses Geräts löscht, kommt wieder rein.
           </p>
         </div>
       )}

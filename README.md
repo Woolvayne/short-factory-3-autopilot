@@ -1,22 +1,25 @@
 # ShortsFactory · Autopilot
 
-**Ein Clip rein, zehn Shorts raus — auf Knopfdruck, mit einem eigenen kleinen Server.**
-Kein Cloud-Deploy, kein Vercel, keine Funktionen: **ein Befehl** startet die komplette Fabrik auf
-deinem Rechner — sie läuft sogar auf einem **Raspberry Pi**.
+**Ein Clip rein, zehn Shorts raus — 100 % im Browser, kein Server, kein Install.**
+Kein Cloud-Deploy, kein Node-Prozess, kein Raspberry-Pi-Setup: Die App ist eine einzige
+HTML-Datei, die überall läuft, wo ein aktueller Browser läuft — vom Gaming-PC bis zum
+zehn Jahre alten Laptop.
 
 ```
-npm start          # oder doppelklickbar/kurz:  ./start.sh
+npm install       # einmalig, nur zum BAUEN (nicht zum Benutzen nötig)
+npm run build     # baut dist/index.html — eine einzige Datei, das war's
 ```
 
-Beim allerersten Start baut `npm start` die App automatisch (auf einem Pi einmalig ~1–2 Minuten).
-Dann im Browser öffnen: **http://localhost:8080** (im Heimnetz: `http://<IP-des-Geräts>:8080`).
+Danach reicht: **`dist/index.html` doppelklicken** (öffnet sich direkt im Browser) — oder die
+Datei auf einen beliebigen Static-Host legen (GitHub Pages, Netlify, ein USB-Stick, …). Fertig.
+Kein Terminal, kein Port, kein `.env`, kein „Server neu starten“.
 
-> **Live-Vorschau (Sandbox):** Die App läuft gerade hier — Entwicklungs-Test-Host:
-> `https://8080-<sandboxId>.e2b.app` (Port 8080, siehe Prozess-Panel). Dorthin zeigt die
-> Browser-Vorschau dieser Sitzung.
+> **Live-Vorschau (Sandbox):** Die App läuft gerade hier via `npm run preview` — Test-Host:
+> `https://8080-<sandboxId>.e2b.app` (siehe Prozess-Panel). Für den echten Einsatz reicht die
+> einzelne `dist/index.html`, ganz ohne laufenden Prozess.
 
 > **📖 Einrichtung (Deutsch, Schritt für Schritt):** [docs/EINRICHTUNG.md](docs/EINRICHTUNG.md)
-> · **Details & Troubleshooting:** [docs/ANLEITUNG.md](docs/ANLEITUNG.md)
+> · **Details & Technik:** [docs/ANLEITUNG.md](docs/ANLEITUNG.md)
 
 ---
 
@@ -24,81 +27,76 @@ Dann im Browser öffnen: **http://localhost:8080** (im Heimnetz: `http://<IP-des
 
 1. **10 Ideen** — per KI (Qwen/Mistral-Key, nur im Browser) oder mit dem eingebauten
    Offline-Generator.
-2. **10 Skripte + 10 neurale Stimmen** — Edge-Read-Aloud-Stimmen mit echten Wort-Timings
-   (der eingebaute Server spricht sie aus). Läuft die App ausnahmsweise rein statisch ohne
-   Server, springt automatisch eine Browser-Stimmen-Engine ein.
+2. **10 Skripte + 10 Stimmen** — eine freie Sprach-Engine läuft direkt im Browser, kein Key,
+   kein Server nötig.
 3. **10 Videos rendern** — komplett **im Browser** (Canvas + MediaRecorder): Untertitel im
-   Wort-Takt, Reddit-Intro-Karte, Hintergrund-Gameplay, Musik. Kein Server-Codieren — darum
-   reicht auch ein Pi als Ablage-Ort.
+   Wort-Takt, Reddit-Intro-Karte, Hintergrund-Gameplay, Musik. Ein Video nach dem anderen —
+   leichtgewichtig genug für schwache Hardware, ohne dass die Qualität leidet.
 4. **Versand über Zernio** — Panel `06 · ZERNIO VERSAND`: sofort, geplante Slots (06/20 Uhr),
    eigene Zeiten pro Video oder flexible Serie mit Abstand. Pflichtpause von 3 Sekunden zwischen
-   jedem Video ist eingebaut.
+   jedem Video ist eingebaut. Der API-Key bleibt im Browser-Speicher dieses Geräts.
 5. **AUTOPILOT** — Panel `AP`: **ein Knopf**, dann läuft alles obige automatisch. Danach geht
    **alle N Minuten** eine **Sendewelle** mit X Videos an Zernio raus (z. B. alle 60 Min je 2 —
    frei einstellbar), mit Live-Countdown, Wellen-Anzeige und Protokoll. Optional
    **Endlos-Loop**: Nach dem Versand startet der nächste Zyklus mit frischen Ideen.
    ⚠️ Wichtig: Der **Tab muss offen bleiben** — Fabrik, Render-Mühle und Versand-Uhr laufen im
-   Browser. Beim Rendern sollte der Tab im Vordergrund sein.
+   Browser. Die App fordert dafür automatisch einen **Wake-Lock** an, damit der Bildschirm
+   während des Laufs nicht einschläft (unterstützt der Browser das nicht, bitte den
+   Auto-Standby des Geräts kurz manuell deaktivieren).
 
 ## Architektur auf einen Blick
 
 ```
-npm start
-  └─ scripts/start.mjs ── baut dist/ (einmalig) → startet server/index.mjs
-       └─ server/ … genau EIN Node-Prozess, Abhängigkeiten: Node ≥ 18 + `ws`
-            ├─ statische App (dist/index.html — Vite-Singlefile-Bundle)
-            ├─ /api/health   Lebenszeichen (Frontend erkennt: „Server da“)
-            ├─ /api/auth     Passwort-Gate (APP_PASSWORD, IP-Rate-Limit in-memory)
-            ├─ /api/tts      Edge-Read-Aloud-Relay (Stimmen + Wort-Timings)
-            └─ /api/zernio   Zernio-Relay (ZERNIO_API_KEY bleibt auf dem Rechner)
+dist/index.html   ← eine einzige Datei (Vite-Singlefile-Bundle), ~180 KB gzip
+   │
+   ▼
+läuft NUR im Browser — keine Backend-Aufrufe außer:
+   ├─ freie Sprach-Engine (Text → Sprache, kein Key)
+   ├─ optional: Qwen/Mistral (KI-Texte, nur mit eigenem Key)
+   └─ Zernio-API (Versand, nur mit eigenem Key)
 ```
 
-- **Ein Kommando**: `npm start` (baut bei Bedarf vorher `vite build`).
-- **Raspberry-Pi-tauglich**: ARM, wenig RAM — der Server serviert nur Dateien und reicht API-Calls
-  weiter; die Bildschirm-Arbeit (Rendern) macht der Browser des davor sitzenden Menschen.
-- **Graceful Degradation**: Läuft die App rein statisch (irgendein Webserver, kein Node),
-  erkennt das Frontend das über `/api/health` und schaltet automatisch um: Browser-Stimmen,
-  Zernio-Direktmodus mit App-Key, lokaler Passwortschutz.
-- **Alles bleibt zu Hause**: Videos, Keys und Passwort verlassen deinen Rechner nur dorthin, wo
-  sie hingehören (Zernio-API, Stimmen-Endpoint, optional KI-Provider). Kein Tracking.
+- **Kein Server**: Passwortschutz, API-Keys und Einstellungen liegen ausschließlich im
+  `localStorage` dieses Geräts. Niemand außer dir sieht sie.
+- **Läuft auf jeder Kartoffel**: Ein React-Build ohne schwere Video-Bibliotheken, das Rendern
+  passiert sequenziell (ein Video nach dem anderen) direkt im Canvas des Tabs — das reicht für
+  alte Laptops, Tablets, oder einen Raspberry Pi mit aktuellem Browser, ohne dass die
+  Video-Qualität sinkt.
+- **Kein Tracking, keine Cloud-Abhängigkeit**: Videos verlassen dein Gerät nur dorthin, wo sie
+  hingehören (Zernio-API, Sprach-Engine, optional KI-Provider).
 
 ## Voraussetzungen
 
 | Was | Wofür |
 | --- | --- |
-| **Node.js ≥ 18** | der eingebaute Server (`npm install && npm start`) |
-| Moderner Browser (Chrome/Edge) | die Fabrik selbst + Hardware-näheres Rendern |
-| Zernio-Account + API-Key (`sk_…`) | Versand (Panel 06), optional im `.env` |
+| Ein aktueller Browser (Chrome/Edge/Firefox/Safari) | **die ganze App** — mehr braucht es nicht |
+| Node.js ≥ 18 | **nur** zum einmaligen Bauen (`npm run build`), nicht zum Benutzen |
+| Zernio-Account + API-Key (`sk_…`) | Versand (Panel 06), im Browser eingetragen |
 | (Optional) Qwen-/Mistral-Key | echte KI-Ideen/Skripte statt Offline-Generator |
 
 ## Schnellstart
 
 ```bash
-npm install          # einmalig
-cp .env.example .env # optional: APP_PASSWORD / ZERNIO_API_KEY eintragen
-npm start            # → http://localhost:8080
+npm install          # einmalig, nur für den Build
+npm run build         # erzeugt dist/index.html
 ```
 
-Auf dem **Raspberry Pi**: Repo klonen/kopieren → `./start.sh` → Fertig. Pi-spezifische Tipps
-(Autostart via systemd, Internet-Freigabe, Chromium im Kiosk-Modus): [docs/ANLEITUNG.md](docs/ANLEITUNG.md).
+Danach `dist/index.html` im Browser öffnen (Doppelklick) oder irgendwo statisch hosten. Zum
+Entwickeln/Testen mit Hot-Reload: `npm run dev`.
 
 ## Projekt-Layout
 
 ```
-server/     der eine Node-Server (kein Framework)
-scripts/    start.mjs (Auto-Build) · hash-password.mjs (APP_PASSWORD_HASH-Werkzeug)
-src/        die React-App (Fabrik-Hall + alle Panels)
+src/        die React-App (Fabrik-Hall + alle Panels) — läuft komplett im Browser
 docs/       deutsche Anleitungen
-dist/       Build-Ergebnis (wird von npm start erzeugt/bedient; in .gitignore)
+dist/       Build-Ergebnis: eine einzige index.html (wird von `npm run build` erzeugt; in .gitignore)
 ```
 
 ## Scripts
 
 | Befehl | Zweck |
 | --- | --- |
-| `npm start` | **der Knopf**: baut bei Bedarf + startet den Server |
-| `./start.sh` | Pi-/Linux-Variante: installiert sogar Dependencies mit |
-| `npm run dev` | Vite-Devserver (nur Frontend-Entwicklung) |
-| `npm run build` | produziert dist/index.html |
+| `npm run build` | baut die eine `dist/index.html` — das eigentliche Ergebnis |
+| `npm run dev` | Vite-Devserver mit Hot-Reload (für die Entwicklung) |
+| `npm run preview` | testet den fertigen Build lokal über HTTP |
 | `npm run typecheck` | TypeScript-Prüfung |
-| `npm run password:hash` | SHA-256 für `APP_PASSWORD_HASH` |

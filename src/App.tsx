@@ -101,6 +101,7 @@ import {
   type AutopilotState,
 } from "./lib/autopilot";
 import type { ShipLogEntry, ShipState } from "./lib/types";
+import { releaseWakeLock, requestWakeLock, wakeLockSupported } from "./lib/wakeLock";
 
 const INITIAL_IDEAS = Array.from({ length: 10 }, () => "");
 const IDLE_ZIP: ZipState = {
@@ -200,6 +201,27 @@ function Factory({ onLock, gateStatus }: { onLock?: () => void; gateStatus?: Gat
   useEffect(() => saveAutopilotConfig(apCfg), [apCfg]);
 
   const busy = phase === "preparing" || phase === "rendering";
+
+  /* Bildschirm/Tab wach halten, solange gerendert oder Autopilot läuft — die
+   * Fabrik läuft 100 % im Browser dieses Tabs, ein Standby würde alles
+   * unterbrechen. Läuft nichts mehr, wird der Lock sofort wieder freigegeben. */
+  const [wakeLockOk, setWakeLockOk] = useState(false);
+  const keepAwake = busy || ap.running;
+  useEffect(() => {
+    let alive = true;
+    if (keepAwake) {
+      void requestWakeLock().then((ok) => {
+        if (alive) setWakeLockOk(ok);
+      });
+    } else {
+      void releaseWakeLock();
+      setWakeLockOk(false);
+    }
+    return () => {
+      alive = false;
+    };
+  }, [keepAwake]);
+  useEffect(() => () => void releaseWakeLock(), []);
 
   useEffect(() => {
     if (!busy) return;
@@ -769,7 +791,7 @@ function Factory({ onLock, gateStatus }: { onLock?: () => void; gateStatus?: Gat
       if (!status.configured) {
         throw new Error(
           status.error ??
-            "Zernio-Key fehlt — ZERNIO_API_KEY in die .env des Servers ODER unten im Panel 06 eintragen (sk_…)."
+            "Zernio-Key fehlt — unten im Panel 06 eintragen (sk_…)."
         );
       }
       if (status.accounts.length === 0) {
@@ -1004,7 +1026,7 @@ function Factory({ onLock, gateStatus }: { onLock?: () => void; gateStatus?: Gat
         setShipStatus(status);
         if (!status.configured) {
           blockers.push(
-            "Zernio-Key fehlt — ZERNIO_API_KEY in die .env des Servers schreiben ODER in Panel 06 unter „API-KEY“ eintragen (sk_…)."
+            "Zernio-Key fehlt — in Panel 06 unter „API-KEY“ eintragen (sk_…)."
           );
         } else if (status.ok && status.accounts.length === 0) {
           blockers.push(
@@ -1381,6 +1403,8 @@ function Factory({ onLock, gateStatus }: { onLock?: () => void; gateStatus?: Gat
             footageReady={mode === "single" ? !!source : readyBgs.length === 10}
             onStart={startAutopilot}
             onStop={stopAutopilot}
+            wakeLockActive={wakeLockOk}
+            wakeLockSupported={wakeLockSupported()}
           />
         </div>
 
@@ -1602,18 +1626,17 @@ function Factory({ onLock, gateStatus }: { onLock?: () => void; gateStatus?: Gat
 }
 
 /* ------------------------------------------------------------------ */
-/*  Onepage Passwort-Schutz (serverseitig, mit IP-Rate-Limit)          */
+/*  Onepage Passwort-Schutz (komplett im Browser, kein Server)          */
 /*                                                                      */
-/*  Ist auf dem Server `APP_PASSWORD` / `APP_PASSWORD_HASH` gesetzt      */
-/*  (oder lokal `VITE_APP_PASSWORD_HASH`), rendert die App               */
-/*  AUSSCHLIESSLICH die Passwort-Seite, bis das richtige Passwort        */
-/*  eingegeben wurde. Die Fabrik dahinter wird gar nicht erst gemountet. */
-/*  Geprüft wird über `/api/auth`, gesperrt wird pro IP. Das Token liegt  */
-/*  nur im Arbeitsspeicher → jedes Neuladen verlangt das Passwort neu.    */
-/*  Anleitung: docs/EINRICHTUNG.md                                      */
+/*  Ist unter Einstellungen → APP ein lokales Passwort gesetzt, rendert  */
+/*  die App AUSSCHLIESSLICH die Passwort-Seite, bis es eingegeben wurde. */
+/*  Die Fabrik dahinter wird gar nicht erst gemountet. Geprüft wird      */
+/*  gegen einen SHA-256-Hash im localStorage dieses Geräts, gesperrt     */
+/*  wird pro Gerät. Das Token liegt nur im Arbeitsspeicher → jedes       */
+/*  Neuladen verlangt das Passwort neu. Anleitung: docs/EINRICHTUNG.md   */
 /* ------------------------------------------------------------------ */
 
-/** Kurzer Splash, während der Gate-Status vom Server geholt wird. */
+/** Kurzer Splash, während der lokale Gate-Status geprüft wird. */
 function GateBoot() {
   return (
     <div className="grain relative flex min-h-dvh flex-col items-center justify-center gap-4 bg-coal-950">
@@ -1644,7 +1667,7 @@ export default function App() {
 
   const handleUnlock = useCallback(() => {
     setStage("open");
-    /* Zähler der IP wurde serverseitig zurückgesetzt → Status neu ziehen. */
+    /* Zähler auf diesem Gerät wurde zurückgesetzt → Status neu ziehen. */
     void fetchGateStatus().then(setGateStatus);
   }, []);
 

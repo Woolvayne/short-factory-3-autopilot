@@ -1,20 +1,14 @@
 /**
- * Onepage-Passwort-Gate — zwei Wege, automatisch gewählt:
+ * Onepage-Passwort-Gate — läuft komplett im Browser dieses Geräts, kein
+ * Server nötig: Passwort als SHA-256 im localStorage, Fehlversuch-Sperre mit
+ * eskalierenden Zeiten (5 → 15 → 60 → 360 → 1440 min).
  *
- *   1. **Eingebauter Server** (`npm start`, Pi/Heimserver): Die Prüfung läuft
- *      serverseitig über `/api/auth` — Passwort aus `APP_PASSWORD` /
- *      `APP_PASSWORD_HASH` (`.env`), IP-Rate-Limit mit eskalierenden Sperren.
- *   2. **Rein statische Seite** (kein Server erreichbar): Lokaler Schutz auf
- *      diesem Gerät — Passwort als SHA-256 im localStorage, gleiche Sperrlogik
- *      im Browser (Einstellungen → APP). Ehrlicher Sichtschutz ohne Server.
- *
- * In beiden Fällen gilt: Das Sitzungs-Token liegt NUR im Arbeitsspeicher des
- * Tabs → jedes Neuladen (F5) verlangt das Passwort erneut.
+ * Das Sitzungs-Token liegt NUR im Arbeitsspeicher des Tabs → jedes Neuladen
+ * (F5) verlangt das Passwort erneut. Ohne gesetztes Passwort ist die App
+ * offen (kein Gate).
  */
 
-import { probeBackend } from "./relay";
-
-export type GateMode = "server" | "local" | "off";
+export type GateMode = "local" | "off";
 
 /** Standard-Sperrstufen (Minuten). */
 export const DEFAULT_LOCKOUT_MINUTES = [5, 15, 60, 360, 1440];
@@ -24,10 +18,9 @@ const LOCAL_HASH_KEY = "shortsfactory.gate.v1";
 const LOCAL_RATE_KEY = "shortsfactory.gate.rate.v1";
 
 export interface GateStatus {
-  /** "server" = /api/auth aktiv · "local" = Schutz nur auf diesem Gerät · "off" = offen */
+  /** "local" = Schutz auf diesem Gerät aktiv · "off" = offen */
   mode: GateMode;
   requirePassword: boolean;
-  serverReachable: boolean;
   locked: boolean;
   retryAfterSeconds: number;
   lockedUntil: number | null;
@@ -37,7 +30,7 @@ export interface GateStatus {
   maxAttempts: number;
   schedule: number[];
   nextLockoutMinutes: number;
-  store: "redis" | "memory" | "browser";
+  store: "browser";
   sessionTtlSeconds: number;
   error?: string;
 }
@@ -45,7 +38,6 @@ export interface GateStatus {
 export const FALLBACK_STATUS: GateStatus = {
   mode: "off",
   requirePassword: false,
-  serverReachable: false,
   locked: false,
   retryAfterSeconds: 0,
   lockedUntil: null,
@@ -80,10 +72,8 @@ export function lock(): void {
   sessionExpiresAt = 0;
 }
 
-/**
- * Wird ausgelöst, wenn eine Route hinter dem Server-Gate `401` meldet (Token
- * abgelaufen) — die App zeigt dann wieder die Passwort-Seite.
- */
+/** Wird aktuell nirgends mehr ausgelöst (kein Server-Gate mehr) — bleibt für
+ * eventuelle künftige Nutzung/Kompatibilität exportiert. */
 export const GATE_EXPIRED_EVENT = "shortsfactory:gate-expired";
 
 export function notifyGateExpired(): void {
@@ -94,22 +84,22 @@ export function notifyGateExpired(): void {
   }
 }
 
-/** Header für Routen hinter dem Server-Gate (`/api/zernio`). */
+/** Header für evtl. eigene API-Aufrufe (aktuell ungenutzt, da alles direkt im Browser läuft). */
 export function gateHeaders(): Record<string, string> {
   const token = isUnlocked() ? sessionToken : null;
   return token ? { "x-sf-auth": token } : {};
 }
 
 /* ------------------------------------------------------------------ */
-/*  Krypto-Helfer (lokaler Modus)                                       */
+/*  Krypto-Helfer                                                        */
 /* ------------------------------------------------------------------ */
 
-/** SHA-256 hex — braucht einen secure context (HTTPS oder localhost). */
+/** SHA-256 hex — braucht einen secure context (HTTPS, localhost oder file://). */
 export async function sha256Hex(text: string): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) {
     throw new Error(
-      "crypto.subtle fehlt — die Passwort-Prüfung läuft nur über HTTPS oder localhost."
+      "crypto.subtle fehlt — die Passwort-Prüfung läuft nur über HTTPS, localhost oder eine lokal geöffnete Datei."
     );
   }
   const digest = await subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -162,7 +152,7 @@ export function clearGatePassword(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Lokaler Modus — Zähler pro Gerät                                    */
+/*  Zähler pro Gerät                                                     */
 /* ------------------------------------------------------------------ */
 
 interface LocalRateState {
@@ -214,54 +204,11 @@ function localStatus(): GateStatus {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Server-Kommunikation                                                */
+/*  Öffentliche API                                                      */
 /* ------------------------------------------------------------------ */
 
-const AUTH_ENDPOINT = "/api/auth";
-
-const asStatus = (data: Record<string, unknown> | null): GateStatus => ({
-  mode: "server",
-  requirePassword: true,
-  serverReachable: true,
-  locked: Boolean(data?.locked),
-  retryAfterSeconds: Number(data?.retryAfterSeconds ?? 0),
-  lockedUntil: data?.lockedUntil ? Number(data.lockedUntil) : null,
-  attemptsLeft: Number(data?.attemptsLeft ?? FALLBACK_STATUS.maxAttempts),
-  failures: Number(data?.failures ?? 0),
-  level: Number(data?.level ?? 0),
-  maxAttempts: Number(data?.maxAttempts ?? FALLBACK_STATUS.maxAttempts),
-  schedule:
-    Array.isArray(data?.schedule) && data.schedule.length
-      ? (data.schedule as number[]).map(Number)
-      : DEFAULT_LOCKOUT_MINUTES,
-  nextLockoutMinutes: Number(data?.nextLockoutMinutes ?? DEFAULT_LOCKOUT_MINUTES[0]),
-  store: (data?.store === "redis" ? "redis" : "memory") as GateStatus["store"],
-  sessionTtlSeconds: Number(data?.sessionTtlSeconds ?? FALLBACK_STATUS.sessionTtlSeconds),
-});
-
-/**
- * Fragt zuerst den eingebauten Server; ist er nicht da (oder ohne Passwort
- * konfiguriert), greift der lokale Modus.
- */
+/** Kein Passwort gesetzt → offen. Sonst lokaler Schutz auf diesem Gerät. */
 export async function fetchGateStatus(): Promise<GateStatus> {
-  if (await probeBackend()) {
-    try {
-      const res = await fetch(`${AUTH_ENDPOINT}?action=status`, {
-        cache: "no-store",
-        headers: { accept: "application/json" },
-      });
-      if (res.ok) {
-        const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-        if (data && data.configured) return asStatus(data);
-        /* Server da, aber kein Server-Passwort → ggf. lokaler Schutz */
-        return hasGatePassword()
-          ? { ...localStatus(), serverReachable: true }
-          : { ...FALLBACK_STATUS, serverReachable: true };
-      }
-    } catch {
-      /* fällt auf lokal zurück */
-    }
-  }
   return hasGatePassword() ? localStatus() : { ...FALLBACK_STATUS };
 }
 
@@ -269,50 +216,8 @@ export type UnlockResult =
   | { ok: true; token: string; message?: string }
   | { ok: false; status: GateStatus; message: string; code: "FALSCH" | "GESPERRT" | "FEHLER" | "LEER" };
 
-/** Schickt das Passwort an `/api/auth` — oder prüft lokal, wenn kein Server da ist. */
+/** Prüft das Passwort lokal gegen den gespeicherten Hash + lokales Rate-Limit. */
 export async function unlock(password: string): Promise<UnlockResult> {
-  const server = await probeBackend();
-
-  if (server) {
-    try {
-      const res = await fetch(AUTH_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ action: "unlock", password }),
-      });
-      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (data && typeof data.ok !== "undefined") {
-        if (res.ok && data.ok && typeof data.token === "string") {
-          sessionToken = data.token;
-          sessionExpiresAt = Number(data.expiresAt ?? 0) || Date.now() + 12 * 3600 * 1000;
-          return { ok: true, token: data.token, message: String(data.message ?? "") };
-        }
-        /* Server ohne konfiguriertes Passwort → lokal weiter */
-        if (data.configured === false) return localUnlock(password);
-        const status = asStatus(data);
-        const raw = String(data?.error ?? "").toUpperCase();
-        const code: "FALSCH" | "GESPERRT" | "LEER" | "FEHLER" =
-          raw === "FALSCH" || raw === "GESPERRT" || raw === "LEER" ? raw : "FEHLER";
-        const message =
-          typeof data?.message === "string" && data.message
-            ? data.message
-            : code === "GESPERRT"
-              ? "Zu viele Fehlversuche — diese IP ist vorübergehend gesperrt."
-              : code === "LEER"
-                ? "Bitte ein Passwort eingeben."
-                : "Falsches Passwort.";
-        return { ok: false, status, message, code };
-      }
-    } catch {
-      /* fällt auf lokal zurück */
-    }
-  }
-
-  return localUnlock(password);
-}
-
-/** Prüfung im lokalen Modus gegen den gespeicherten Hash + lokales Rate-Limit. */
-async function localUnlock(password: string): Promise<UnlockResult> {
   const state = localStatus();
   if (state.locked) {
     return { ok: false, status: state, message: "Gesperrt — bitte warten.", code: "GESPERRT" };
@@ -408,10 +313,8 @@ export const gateInfo = (status: GateStatus | null) => {
     mode,
     enabled: mode !== "off",
     hint:
-      mode === "server"
-        ? "Serverseitiges Gate aktiv (APP_PASSWORD in der .env deines Servers). Jede falsche Eingabe zählt pro IP, das Token liegt nur im Tab-Speicher."
-        : mode === "local"
-          ? "Lokaler Schutz: Passwort als Hash auf DIESEM Gerät (kein Server). Ändern/Entfernen: Einstellungen → APP."
-          : "Kein Passwort gesetzt → die App ist offen. Schutz optional: APP_PASSWORD in der .env (Server) oder lokal unter Einstellungen → APP.",
+      mode === "local"
+        ? "Lokaler Schutz: Passwort als Hash auf DIESEM Gerät (kein Server, kein Upload). Ändern/Entfernen: Einstellungen → APP."
+        : "Kein Passwort gesetzt → die App ist offen. Schutz optional: unter Einstellungen → APP setzen.",
   };
 };

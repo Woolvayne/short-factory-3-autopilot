@@ -209,7 +209,7 @@ export default function ShipPanel({
           <span className="font-mono text-[9.5px] leading-relaxed text-amber-warn">
             {status?.error
               ? status.error.slice(0, 180)
-              : "Key holen: zernio.com → API → ZERNIO_API_KEY in die .env des Servers ODER direkt hier unten eintragen."}
+              : "Key holen: zernio.com → API → hier unten eintragen (sk_…)."}
           </span>
         )}
         {status?.configured && accounts.length === 0 && (
@@ -221,8 +221,8 @@ export default function ShipPanel({
 
       {/* ----------------------------------------- API-Key (Fallback) */}
       <Field
-        label="API-KEY (NUR WENN KEIN SERVER)"
-        hint={status?.via === "relay" ? "SERVER-.env AKTIV — DIESER KEY WIRD IGNORIERT" : status?.via === "direct" ? "APP-KEY AKTIV · NUR LOKAL GESPEICHERT" : "sk_…"}
+        label="ZERNIO API-KEY"
+        hint={status?.configured ? "APP-KEY AKTIV · NUR LOKAL GESPEICHERT" : "sk_…"}
       >
         <div className="relative">
           <KeyRound className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-coal-400" />
@@ -231,7 +231,7 @@ export default function ShipPanel({
             value={cfg.apiKey}
             autoComplete="off"
             spellCheck={false}
-            placeholder="sk_… (leer lassen, wenn der Server .env-Key gilt)"
+            placeholder="sk_…"
             onChange={(e) => set("apiKey", e.target.value.trim())}
             className="w-full border border-coal-700/80 bg-coal-850 py-2.5 pr-10 pl-9 font-mono text-[11px] text-paper-100 placeholder:text-coal-500 focus:border-volt-400/70 focus:outline-none"
           />
@@ -246,9 +246,8 @@ export default function ShipPanel({
         </div>
       </Field>
       <p className="-mt-1 mb-1 font-mono text-[9px] leading-relaxed text-coal-500">
-        MIT SERVER (npm start) BRAUCHST DU DAS HIER NICHT — DER KEY LIEGT SICHER IN DER .env DES
-        RECHNERS. NUR NÜTZLICH, WENN DIE FABRIK REIN STATISCH OHNE SERVER LÄUFT: DANN GEHT DER
-        VERSAND DIREKT AUS DEM BROWSER (BLEIBT IM BROWSER-STORAGE, WIRD NIRGENS HOCHGELADEN).
+        DER VERSAND GEHT DIREKT AUS DIESEM BROWSER AN ZERNIO — DER KEY BLEIBT NUR IM
+        BROWSER-STORAGE DIESES GERÄTS UND WIRD SONST NIRGENDWO HOCHGELADEN.
       </p>
 
       <div className="grid gap-4 lg:grid-cols-2">

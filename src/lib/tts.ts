@@ -1,22 +1,13 @@
 /**
- * Narration engine — zwei Wege, automatisch gewählt:
+ * Narration engine — 100 % im Browser, kein Server nötig.
  *
- *   1. **Eingebauter Server** (`npm start` auf dem Pi/Heimserver): Der Browser
- *      POSTet an `/api/tts`, das Edge-Read-Aloud-Relay spricht — neurale
- *      Stimmen + ECHTE Wort-Timings (Karaoke-Captions tickgenau), kostenlos.
- *   2. **Rein statische Seite** (kein Server erreichbar): Die App spricht den
- *      freien Web-TTS-Endpunkt von StreamElements direkt an (kein API-Key) und
- *      schätzt die Wort-Timings aus der gemessenen Audio-Dauer. Tempo ±40 %
- *      wird offline in die Datei gebrannt (OfflineAudioContext).
+ * Die App spricht den freien Web-TTS-Endpunkt von StreamElements direkt an
+ * (kein API-Key) und schätzt die Wort-Timings aus der gemessenen Audio-Dauer.
+ * Tempo ±40 % wird offline in die Datei gebrannt (OfflineAudioContext).
  *
- * Die Außenwelt sieht in beiden Fällen dasselbe: `synthesizeSpeech(text,
- * voice, rate, pitch) → { audio, words, duration }` — der Renderer bleibt
- * unverändert.
+ * `synthesizeSpeech(text, voice, rate, pitch) → { audio, words, duration }` —
+ * der Renderer bekommt in jedem Fall dasselbe Ergebnis.
  */
-
-import { probeBackend } from "./relay";
-
-const TTS_ENDPOINT = "/api/tts";
 
 export interface WordTs {
   text: string;
@@ -31,7 +22,7 @@ export interface Cue {
 }
 
 export interface TtsResult {
-  /** MP3 (Server) bzw. PCM-WAV (Browser-Fallback) — `decodeAudioData` frisst beides */
+  /** PCM-WAV — überall im Browser dekodierbar */
   audio: ArrayBuffer;
   words: WordTs[];
   /** voice duration incl. tail padding, seconds */
@@ -39,70 +30,7 @@ export interface TtsResult {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Weg 1 — Server-Relay /api/tts (Edge Read-Aloud, echte Timings)      */
-/* ------------------------------------------------------------------ */
-
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes.buffer;
-}
-
-async function synthesizeViaRelay(
-  text: string,
-  voice: string,
-  rate: number,
-  pitch: number
-): Promise<TtsResult> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 75_000);
-  try {
-    const res = await fetch(TTS_ENDPOINT, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice, rate, pitch }),
-    });
-
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.audioBase64) {
-      throw new Error(
-        typeof data?.error === "string"
-          ? data.error
-          : `TTS relay failed (HTTP ${res.status ?? "?"})`
-      );
-    }
-
-    const audio = base64ToArrayBuffer(data.audioBase64 as string);
-    if (audio.byteLength === 0) throw new Error("TTS relay returned no audio");
-
-    const words: WordTs[] = (Array.isArray(data.words) ? data.words : []).map(
-      (w: { text?: string; offset?: number; duration?: number }) => ({
-        text: String(w?.text ?? ""),
-        offset: Number(w?.offset ?? 0),
-        duration: Number(w?.duration ?? 0),
-      })
-    );
-
-    const last = words[words.length - 1];
-    return {
-      audio,
-      words,
-      duration: last ? last.offset + last.duration + 0.7 : 4,
-    };
-  } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") {
-      throw new Error("TTS relay timed out after 75s");
-    }
-    throw e instanceof Error ? e : new Error(String(e));
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Weg 2 — Browser-Engine (freier Web-TTS, geschätzte Timings)          */
+/*  Browser-Engine (freier Web-TTS, geschätzte Timings)                  */
 /* ------------------------------------------------------------------ */
 
 const BROWSER_TTS_BASE = "https://api.streamelements.com/kappa/v2/speech";
@@ -128,7 +56,7 @@ export const BROWSER_TTS_VOICES: TtsVoice[] = [
   { id: "Emma", label: "Emma · British female, calm" },
 ];
 
-/** Alte/Server-Stimmen-IDs → nächstliegende Stimme der Browser-Engine. */
+/** Alte Stimmen-IDs (v3) → nächstliegende Stimme der Browser-Engine. */
 const FALLBACK_VOICE_MAP: Record<string, string> = {
   "en-US-AndrewNeural": "Matthew",
   "en-US-ChristopherNeural": "Matthew",
@@ -283,7 +211,7 @@ async function synthesizeInBrowser(
   rate: number,
   pitch: number
 ): Promise<TtsResult> {
-  void pitch; /* die Browser-Engine kann kein Pitch — Server-Engine schon */
+  void pitch; /* die Browser-Engine kann kein Pitch */
   const engineVoice = mapBrowserVoice(voice);
 
   let lastError: unknown = null;
@@ -332,17 +260,13 @@ async function synthesizeInBrowser(
 /*  Öffentliche API                                                      */
 /* ------------------------------------------------------------------ */
 
-/**
- * Spricht `text` mit `voice` ein. Mit eingebautem Server über das Edge-Relay
- * (echte Wort-Timings), sonst direkt aus dem Browser (geschätzte Timings).
- */
+/** Spricht `text` mit `voice` ein — komplett im Browser, geschätzte Wort-Timings. */
 export async function synthesizeSpeech(
   text: string,
   voice: string,
   rate = 0,
   pitch = 0
 ): Promise<TtsResult> {
-  if (await probeBackend()) return synthesizeViaRelay(text, voice, rate, pitch);
   return synthesizeInBrowser(text, voice, rate, pitch);
 }
 

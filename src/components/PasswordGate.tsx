@@ -25,10 +25,10 @@ import {
  * The one-page password screen. It is the ONLY thing that renders until the
  * visitor types the correct password.
  *
- * Prüfung + Sperre laufen serverseitig (`/api/auth`): Nach `maxAttempts`
- * Fehlversuchen in Folge wird die **IP** gesperrt — mit eskalierenden
- * Sperrzeiten. Das Token liegt danach nur im Arbeitsspeicher, ein Neuladen
- * der Seite verlangt also wieder das Passwort.
+ * Prüfung + Sperre laufen komplett im Browser dieses Geräts (kein Server):
+ * Nach `maxAttempts` Fehlversuchen in Folge wird für eine Weile gesperrt —
+ * mit eskalierenden Sperrzeiten. Das Token liegt danach nur im
+ * Arbeitsspeicher, ein Neuladen der Seite verlangt also wieder das Passwort.
  */
 export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
   const [value, setValue] = useState("");
@@ -146,16 +146,9 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
             </h1>
           </div>
           <p className="mb-6 font-mono text-[11px] leading-relaxed text-coal-300">
-            Diese Fabrik ist privat. Das Passwort wird auf dem Server geprüft
-            {status?.mode === "server" ? (
-              <>
-                {" "}
-                — nach <span className="text-volt-300">{maxAttempts} Fehlversuchen</span> wird die IP
-                gesperrt.
-              </>
-            ) : (
-              "."
-            )}
+            Diese Fabrik ist privat. Das Passwort wird direkt in diesem Browser geprüft — nach{" "}
+            <span className="text-volt-300">{maxAttempts} Fehlversuchen</span> wird dieses Gerät
+            gesperrt.
           </p>
 
           <label className="block">
@@ -215,12 +208,6 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
                   SPERRE. JEDE WEITERE SPERRE WIRD LÄNGER (
                   {schedule.map((m) => humanizeMinutes(m)).join(" → ")}).
                 </p>
-                {status.store === "memory" && (
-                  <p className="mt-1 text-amber-warn">
-                    HINWEIS: DIE SPERRE LÄUFT IM SERVER-PROZESS (IN-MEMORY) — SIE GILT PRO IP,
-                    SOLANGE DER SERVER LÄUFT, UND WIRD BEIM NEUSTART ZURÜCKGESETZT.
-                  </p>
-                )}
               </div>
             </div>
           )}
@@ -230,7 +217,7 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
               <TriangleAlert className="mt-0.5 size-4 shrink-0 text-rose-err" />
               <p className="font-mono text-[10.5px] leading-relaxed text-rose-err">
                 {error}
-                {status && status.mode === "server" && (
+                {status && status.mode === "local" && (
                   <span className="mt-1 block text-coal-200">
                     NOCH {status.attemptsLeft} VON {maxAttempts} VERSUCHEN — DANN {nextLock} SPERRE.
                   </span>
@@ -261,22 +248,15 @@ export default function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
           </button>
 
           <div className="mt-5 flex items-start gap-2 border border-coal-700/70 bg-coal-950/40 px-3 py-2.5">
-            {status?.mode === "server" ? (
+            {status?.mode === "local" ? (
               <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-volt-300" />
             ) : (
               <ShieldAlert className="mt-0.5 size-3.5 shrink-0 text-amber-warn" />
             )}
             <p className="font-mono text-[9.5px] leading-relaxed text-coal-400">
-              {booting ? "Status wird geprüft…" : info.hint}
-              {status?.mode === "server"
-                ? "Passwort ändern: APP_PASSWORD in der .env deines Servers anpassen → Server neu starten."
-                : "Passwort ändern/entfernen: in der App unter Einstellungen → APP."}{" "}
-              Schritt für Schritt: <span className="text-volt-300">docs/EINRICHTUNG.md</span>
-              {status?.mode === "server" && status.store === "memory" && (
-                <span className="mt-1 block text-coal-500">
-                  SPERREN LAUFEN IM SERVER-PROZESS (IN-MEMORY) — NEUSTART SETZT SIE ZURÜCK.
-                </span>
-              )}
+              {booting ? "Status wird geprüft…" : info.hint} Passwort ändern/entfernen: in der App
+              unter Einstellungen → APP. Schritt für Schritt:{" "}
+              <span className="text-volt-300">docs/EINRICHTUNG.md</span>
             </p>
           </div>
         </form>
